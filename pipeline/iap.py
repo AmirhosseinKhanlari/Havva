@@ -47,7 +47,7 @@ _IAP_RE = re.compile("|".join(_IAP_TEXT_PATTERNS), re.IGNORECASE)
 _ATTR_P_RE = re.compile(r'<p[^>]*class="[^"]*attributes[^"]*"[^>]*>(.*?)</p>',
                         re.IGNORECASE | re.DOTALL)
 # Fallback: the info-list row header, present only when the app has IAP.
-_DT_RE = re.compile(r'<dt[^>]*>\s*(' + "|".join(_IAP_TEXT_PATTERNS) + r')\s*</dt>',
+_DT_RE = re.compile(r'<dt[^>]*>\s*(?:' + "|".join(_IAP_TEXT_PATTERNS) + r')',
                     re.IGNORECASE)
 
 
