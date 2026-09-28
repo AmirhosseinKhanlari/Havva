@@ -1,0 +1,10 @@
+# Core
+requests>=2.31          # crawling + metadata (iTunes lookup, chart APIs)
+lief>=0.14              # Mach-O load-command injection for dylibs
+
+# Dynamic stage (added as those modules land)
+# Appium-Python-Client   # UI automation on the XR via WebDriverAgent
+# facebook-wda           # alternative WDA client
+
+# Dev
+pytest>=8.0

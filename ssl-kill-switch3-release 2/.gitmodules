@@ -1,0 +1,4 @@
+[submodule "SSLKillSwitch/fishhook"]
+	path = SSLKillSwitch/fishhook
+	url = https://github.com/jevinskie/fishhook
+	branch = jev/arm64e

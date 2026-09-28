@@ -1,0 +1,27 @@
+# Secrets and machine-specific config
+.env
+
+# Large data / artifacts
+ipas/
+work/
+results/
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.ipa
+*.har
+
+# Decrypted binaries and captured traffic must never be committed
+decrypted/
+captures/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# macOS
+.DS_Store
