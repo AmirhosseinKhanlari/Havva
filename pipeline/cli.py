@@ -38,6 +38,13 @@ def cmd_acquire(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_static(args: argparse.Namespace) -> int:
+    from . import static_classify
+    db = Database(CONFIG.paths.db)
+    print(static_classify.run(db, limit=args.limit))
+    return 0
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     db = Database(CONFIG.paths.db)
     counts = db.counts()
@@ -96,10 +103,14 @@ def main() -> int:
                          help="chart source (auto: appfigures if APPFIGURES_COOKIE set, else itunes)")
     p_crawl.set_defaults(func=cmd_crawl)
 
-    p_acq = sub.add_parser("acquire", help="decrypt IPAs via ipadecrypt")
+    p_acq = sub.add_parser("acquire", help="download + decrypt IPAs (ipadecrypt or ipatool)")
     p_acq.add_argument("--limit", type=int, help="max apps this run")
     p_acq.add_argument("--from-appstore", action="store_true", help="force App Store fetch")
     p_acq.set_defaults(func=cmd_acquire)
+
+    p_static = sub.add_parser("static", help="static defense classifier over decrypted IPAs")
+    p_static.add_argument("--limit", type=int, help="max apps this run")
+    p_static.set_defaults(func=cmd_static)
     args = parser.parse_args()
     return args.func(args)
 

@@ -109,6 +109,16 @@ class DecryptDevice:
 
 
 @dataclass(frozen=True)
+class IpaTool:
+    """Optional downloader: ipatool fetches the still-encrypted IPA, then
+    ipadecrypt decrypts the local file. Alternative to letting ipadecrypt do the
+    download itself. ipatool downloads from the logged-in account's storefront."""
+    cmd: str = field(default_factory=lambda: _env("IPATOOL_CMD", "ipatool"))
+    email: str = field(default_factory=lambda: _env("IPATOOL_EMAIL", ""))
+    password: str = field(default_factory=lambda: _env("IPATOOL_PASSWORD", ""))
+
+
+@dataclass(frozen=True)
 class TestDevice:
     """Non-jailbroken iPhone XR used for all bypass testing."""
     udid: str = field(default_factory=lambda: _env("TEST_DEVICE_UDID", ""))
@@ -155,15 +165,23 @@ class Runtime:
         "EXCLUDED_HOSTS", ["apple.com", "icloud.com", "itunes.apple.com", "mzstatic.com"]))
 
 
+# Acquisition mode: "ipadecrypt" (ipadecrypt downloads + decrypts, supports
+# --storefront for multi-country) or "ipatool" (ipatool downloads encrypted,
+# ipadecrypt decrypts the local file; downloads from the account storefront).
+ACQUIRE_MODE: str = _env("ACQUIRE_MODE", "ipadecrypt")
+
+
 @dataclass(frozen=True)
 class Config:
     paths: Paths = field(default_factory=Paths)
     decrypt_device: DecryptDevice = field(default_factory=DecryptDevice)
+    ipatool: IpaTool = field(default_factory=IpaTool)
     test_device: TestDevice = field(default_factory=TestDevice)
     proxyman: Proxyman = field(default_factory=Proxyman)
     signing: Signing = field(default_factory=Signing)
     dylibs: Dylibs = field(default_factory=Dylibs)
     runtime: Runtime = field(default_factory=Runtime)
+    acquire_mode: str = ACQUIRE_MODE
 
     def missing_for_dynamic(self) -> list[str]:
         """Return human-readable list of config needed before on-device stages."""
