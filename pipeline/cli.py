@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from pathlib import Path
 
 from .config import CONFIG
 from .db import Database
@@ -127,9 +128,15 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
                     ("profile", CONFIG.signing.mobileprovision), ("zsign", CONFIG.signing.zsign)):
         print(f"  {name:16} {'ok: ' + str(p) if Path_exists(p) else 'missing: ' + str(p)}")
     print("\nBypass dylibs:")
+    search_dirs = (CONFIG.paths.dylib_dir, CONFIG.paths.root.parent / "Dylibs")
     for name in (CONFIG.dylibs.ssks, CONFIG.dylibs.sideloadfix, CONFIG.dylibs.frida_gadget):
-        p = CONFIG.paths.dylib_dir / name
-        print(f"  {name:24} {'ok' if p.exists() else 'MISSING'}")
+        found = next((str(d / name) for d in search_dirs if (d / name).exists()), "")
+        print(f"  {name:24} {'ok: ' + found if found else 'MISSING'}")
+
+    print("\nAcquire readiness (Stage B):")
+    print(f"  ipadecrypt bootstrapped  {'yes' if CONFIG.decrypt_device.is_bootstrapped else 'NO (run bootstrap)'}")
+    import shutil as _sh
+    print(f"  ipadecrypt binary        {'ok' if _sh.which(CONFIG.decrypt_device.ipadecrypt_cmd) or Path_exists(Path(CONFIG.decrypt_device.ipadecrypt_cmd)) else 'MISSING'}")
     return 0
 
 
