@@ -15,7 +15,7 @@ import time
 
 import requests
 
-from .config import CONFIG
+from .config import CONFIG, CRAWL_COUNT_PER_CATEGORY, STOREFRONTS
 from .db import Database
 from .util import get_logger
 
@@ -225,9 +225,9 @@ def crawl(db: Database, countries: list[str] | None = None,
           categories: dict[str, str] | None = None,
           count: int | None = None, enrich: bool = True, source: str = "auto") -> int:
     """Crawl all categories x storefronts, enrich, upsert. Returns app count."""
-    countries = countries or CONFIG.STOREFRONTS
+    countries = countries or STOREFRONTS
     categories = categories or CATEGORIES
-    count = count or CONFIG.CRAWL_COUNT_PER_CATEGORY
+    count = count or CRAWL_COUNT_PER_CATEGORY
 
     total = 0
     for country in countries:
