@@ -71,7 +71,7 @@ def cmd_aggregate(_args: argparse.Namespace) -> int:
 def cmd_iap(args: argparse.Namespace) -> int:
     from . import iap
     db = Database(CONFIG.paths.db)
-    print(iap.run(db, limit=args.limit, workers=args.workers))
+    print(iap.run(db, limit=args.limit, workers=args.workers, rotate_vpn=args.rotate_vpn))
     return 0
 
 
@@ -175,7 +175,9 @@ def main() -> int:
     sub.add_parser("aggregate", help="compute metrics + write summary").set_defaults(func=cmd_aggregate)
     p_iap = sub.add_parser("iap", help="detect in-app purchases via App Store pages")
     p_iap.add_argument("--limit", type=int, help="max apps this run")
-    p_iap.add_argument("--workers", type=int, default=12, help="concurrent fetchers")
+    p_iap.add_argument("--workers", type=int, default=8, help="concurrent fetchers")
+    p_iap.add_argument("--rotate-vpn", action="store_true",
+                       help="rotate NordVPN exit IP (openvpn, needs sudo) when throttled")
     p_iap.set_defaults(func=cmd_iap)
 
     sub.add_parser("export", help="write app_ids.txt + app_list.txt from the corpus").set_defaults(func=cmd_export)

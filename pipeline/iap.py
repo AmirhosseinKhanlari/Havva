@@ -84,7 +84,21 @@ def check_has_iap(app_id: str, country: str, session: requests.Session | None = 
     return bool(_DT_RE.search(html))
 
 
-def run(db: Database, limit: int | None = None, workers: int = 12) -> dict[str, int]:
+def _check_chunk(rows, workers: int, session) -> list[tuple[str, bool | None]]:
+    def work(row):
+        return row["app_id"], check_has_iap(row["app_id"], row["country"], session)
+    out = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for fut in as_completed([pool.submit(work, r) for r in rows]):
+            out.append(fut.result())
+    return out
+
+
+def run(db: Database, limit: int | None = None, workers: int = 8,
+        rotate_vpn: bool = False, chunk_size: int = 250,
+        throttle_threshold: float = 0.4) -> dict[str, int]:
+    """Scan IAP in resumable chunks. With rotate_vpn, switch exit IP (openvpn,
+    needs sudo) whenever a chunk comes back mostly throttled."""
     db.add_column_if_missing("apps", "iap_checked", "INTEGER DEFAULT 0")
     with db.connect() as c:
         rows = c.execute(
@@ -92,28 +106,39 @@ def run(db: Database, limit: int | None = None, workers: int = 12) -> dict[str, 
         ).fetchall()
     if limit:
         rows = rows[:limit]
-    stats = {"checked": 0, "has_iap": 0, "no_iap": 0, "errors": 0}
+
+    if rotate_vpn:
+        from . import vpn
+        if not vpn.available():
+            log.warning("rotate_vpn requested but no configs/auth; continuing without")
+            rotate_vpn = False
+        else:
+            vpn.rotate()
 
     session = requests.Session()
-
-    def work(row):
-        return row["app_id"], check_has_iap(row["app_id"], row["country"], session)
-
-    results: list[tuple[str, bool | None]] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(work, r) for r in rows]
-        for i, fut in enumerate(as_completed(futures), 1):
-            results.append(fut.result())
-            if i % 200 == 0:
-                log.info("iap progress: %d/%d", i, len(rows))
-                _flush(db, results); results = []
-    _flush(db, results)
+    total = len(rows)
+    done = 0
+    for start in range(0, total, chunk_size):
+        chunk = rows[start:start + chunk_size]
+        results = _check_chunk(chunk, workers, session)
+        nones = sum(1 for _, v in results if v is None)
+        _flush(db, results)
+        done += len(chunk)
+        fail_rate = nones / len(chunk) if chunk else 0
+        log.info("iap chunk %d-%d: %d throttled (%.0f%%), %d/%d done",
+                 start, start + len(chunk), nones, 100 * fail_rate, done, total)
+        # Requeue throttled ones (they stayed iap_checked=0) by leaving them.
+        if fail_rate >= throttle_threshold and rotate_vpn:
+            log.info("throttled; rotating exit IP")
+            from . import vpn
+            vpn.rotate()
 
     with db.connect() as c:
-        stats["has_iap"] = c.execute("SELECT COUNT(*) FROM apps WHERE has_iap=1").fetchone()[0]
-        stats["no_iap"] = c.execute(
-            "SELECT COUNT(*) FROM apps WHERE has_iap=0 AND iap_checked=1").fetchone()[0]
-        stats["checked"] = c.execute("SELECT COUNT(*) FROM apps WHERE iap_checked=1").fetchone()[0]
+        checked = c.execute("SELECT COUNT(*) FROM apps WHERE iap_checked=1").fetchone()[0]
+        has = c.execute("SELECT COUNT(*) FROM apps WHERE has_iap=1").fetchone()[0]
+        no = c.execute("SELECT COUNT(*) FROM apps WHERE has_iap=0 AND iap_checked=1").fetchone()[0]
+        remaining = c.execute("SELECT COUNT(*) FROM apps WHERE COALESCE(iap_checked,0)=0").fetchone()[0]
+    stats = {"checked": checked, "has_iap": has, "no_iap": no, "remaining": remaining}
     log.info("iap: %s", stats)
     return stats
 
