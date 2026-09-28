@@ -23,17 +23,48 @@ sample.
 
 ```
 pipeline/
-  config.py     # all machine-specific config via env / .env (nothing hardcoded)
-  models.py     # enums + dataclasses: outcomes, crash classes, ladder, profile
-  db.py         # SQLite backbone: schema, resumable tri-state work queues
-  oracle.py     # success oracle (flow diff -> outcome label)   [tested]
-  escalate.py   # crash triage + escalation planner              [tested]
-  cli.py        # status / doctor entry points
-tests/          # oracle, escalate, db
+  config.py         # all machine-specific config via env / .env (nothing hardcoded)
+  models.py         # enums + dataclasses: outcomes, crash classes, ladder, profile
+  db.py             # SQLite backbone: schema, resumable tri-state work queues [tested]
+  util.py           # subprocess runner + logging
+  oracle.py         # success oracle (flow diff -> outcome label)               [tested]
+  escalate.py       # crash triage + escalation planner                         [tested]
+  crawl.py          # A: AppFigures ranks + iTunes RSS fallback + metadata enrich
+  acquire.py        # B: download + FairPlay decrypt (ipadecrypt / ipatool)
+  static_classify.py# C: defense profile (pin layer/lib, TLS stack, attest, tamper) [tested]
+  instrument.py     # D: re-sign + LIEF dylib injection (all bypass configs)
+  device.py         # E: install/launch/drive (Appium + cold-launch) + crash pull
+  capture.py        # 6: Proxyman control + header-aware HAR parsing            [tested]
+  dynamic.py        # E/F/G: run the ladder, triage, decide outcome
+  attestation.py    # H: attestation-enforcement differential test (headline)
+  aggregate.py      # I: metrics + summary
+  cli.py            # status / doctor / crawl / acquire / static / dynamic / attest / aggregate
+tests/              # oracle, escalate, db, static, capture (40 tests)
+scripts/            # attest_neutralize.js (Frida)
+tweaks/EvasionKit/  # bounded detection-neutralization dylib (build with Theos)
+tools/              # prebuilt ipadecrypt (gitignored)
 ```
 
-Modules landing next: `crawl.py`, `acquire.py`, `static_classify.py`,
-`instrument.py`, `device.py`, `capture.py`, `attestation.py`, `aggregate.py`.
+## Running the pipeline
+
+```bash
+python -m pipeline.cli crawl                 # A: build the corpus
+./tools/ipadecrypt bootstrap                 # one-time device setup
+python -m pipeline.cli acquire               # B: download + decrypt
+python -m pipeline.cli static                # C: classify defenses (prevalence)
+python -m pipeline.cli dynamic               # E/F/G: run the bypass ladder
+python -m pipeline.cli attest                # H: attestation-enforcement test
+python -m pipeline.cli aggregate             # I: metrics -> results/summary.md
+```
+
+Every stage is resumable (tri-state work queue) and safe to re-run.
+
+## EvasionKit (bounded detection-neutralization)
+
+The `evasion` bypass rung uses `EvasionKit.dylib`, built from `tweaks/EvasionKit/`
+with Theos + fishhook. Until built, that rung degrades gracefully (skipped). It
+neutralizes only standard detectors (injected-image enumeration, ptrace/sysctl
+anti-debug, csops signature flags), never enforced App Attest.
 
 ## Setup
 

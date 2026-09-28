@@ -11,6 +11,7 @@ in as their modules land.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 
 from .config import CONFIG
@@ -42,6 +43,28 @@ def cmd_static(args: argparse.Namespace) -> int:
     from . import static_classify
     db = Database(CONFIG.paths.db)
     print(static_classify.run(db, limit=args.limit))
+    return 0
+
+
+def cmd_dynamic(args: argparse.Namespace) -> int:
+    from . import dynamic
+    db = Database(CONFIG.paths.db)
+    print(dynamic.run(db, limit=args.limit))
+    return 0
+
+
+def cmd_attest(args: argparse.Namespace) -> int:
+    from . import attestation
+    db = Database(CONFIG.paths.db)
+    print(attestation.run(db, limit=args.limit))
+    return 0
+
+
+def cmd_aggregate(_args: argparse.Namespace) -> int:
+    from . import aggregate
+    db = Database(CONFIG.paths.db)
+    m = aggregate.report(db)
+    print(json.dumps(m, indent=2))
     return 0
 
 
@@ -111,6 +134,16 @@ def main() -> int:
     p_static = sub.add_parser("static", help="static defense classifier over decrypted IPAs")
     p_static.add_argument("--limit", type=int, help="max apps this run")
     p_static.set_defaults(func=cmd_static)
+
+    p_dyn = sub.add_parser("dynamic", help="run the bypass ladder on pinned apps")
+    p_dyn.add_argument("--limit", type=int, help="max apps this run")
+    p_dyn.set_defaults(func=cmd_dynamic)
+
+    p_att = sub.add_parser("attest", help="attestation-enforcement differential test")
+    p_att.add_argument("--limit", type=int, help="max apps this run")
+    p_att.set_defaults(func=cmd_attest)
+
+    sub.add_parser("aggregate", help="compute metrics + write summary").set_defaults(func=cmd_aggregate)
     args = parser.parse_args()
     return args.func(args)
 
