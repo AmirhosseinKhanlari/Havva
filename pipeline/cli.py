@@ -68,6 +68,28 @@ def cmd_aggregate(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(_args: argparse.Namespace) -> int:
+    db = Database(CONFIG.paths.db)
+    out_dir = CONFIG.paths.results_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with db.connect() as c:
+        rows = c.execute(
+            "SELECT app_id, country, bundle_id, primary_category, rank, name "
+            "FROM apps ORDER BY primary_category, rank").fetchall()
+    # Canonical id list (paper-1 style: appid,country)
+    ids = out_dir / "app_ids.txt"
+    ids.write_text("".join(f"{r['app_id']},{r['country']}\n" for r in rows))
+    # Human-readable TSV list
+    full = out_dir / "app_list.txt"
+    with full.open("w") as f:
+        f.write("app_id\tcountry\tbundle_id\tcategory\trank\tname\n")
+        for r in rows:
+            f.write(f"{r['app_id']}\t{r['country']}\t{r['bundle_id'] or ''}\t"
+                    f"{r['primary_category'] or ''}\t{r['rank'] or ''}\t{r['name'] or ''}\n")
+    print(f"wrote {len(rows)} apps to:\n  {ids}\n  {full}")
+    return 0
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     db = Database(CONFIG.paths.db)
     counts = db.counts()
@@ -144,6 +166,7 @@ def main() -> int:
     p_att.set_defaults(func=cmd_attest)
 
     sub.add_parser("aggregate", help="compute metrics + write summary").set_defaults(func=cmd_aggregate)
+    sub.add_parser("export", help="write app_ids.txt + app_list.txt from the corpus").set_defaults(func=cmd_export)
     args = parser.parse_args()
     return args.func(args)
 
