@@ -48,13 +48,13 @@ tools/              # prebuilt ipadecrypt (gitignored)
 ## Running the pipeline
 
 ```bash
-python -m pipeline.cli crawl                 # A: build the corpus
+python3 -m pipeline.cli crawl                 # A: build the corpus
 ./tools/ipadecrypt bootstrap                 # one-time device setup
-python -m pipeline.cli acquire               # B: download + decrypt
-python -m pipeline.cli static                # C: classify defenses (prevalence)
-python -m pipeline.cli dynamic               # E/F/G: run the bypass ladder
-python -m pipeline.cli attest                # H: attestation-enforcement test
-python -m pipeline.cli aggregate             # I: metrics -> results/summary.md
+python3 -m pipeline.cli acquire               # B: download + decrypt
+python3 -m pipeline.cli static                # C: classify defenses (prevalence)
+python3 -m pipeline.cli dynamic               # E/F/G: run the bypass ladder
+python3 -m pipeline.cli attest                # H: attestation-enforcement test
+python3 -m pipeline.cli aggregate             # I: metrics -> results/summary.md
 ```
 
 Every stage is resumable (tri-state work queue) and safe to re-run.
@@ -71,8 +71,8 @@ anti-debug, csops signature flags), never enforced App Attest.
 ```bash
 pip install -r requirements.txt
 cp .env.example .env      # fill in device UDID/IP, SSH host, signing paths
-python -m pipeline.cli doctor    # check tools and assets
-python -m pipeline.cli status    # DB counts and readiness
+python3 -m pipeline.cli doctor    # check tools and assets
+python3 -m pipeline.cli status    # DB counts and readiness
 ```
 
 ## Testing
