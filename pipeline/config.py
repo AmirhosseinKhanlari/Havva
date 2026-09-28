@@ -126,6 +126,23 @@ class TestDevice:
 
 
 @dataclass(frozen=True)
+class Appium:
+    """UI automation server + WebDriverAgent signing for the non-JB device.
+
+    WDA must be code-signed for a real device. Provide the Apple Developer Team
+    ID (org id) and a signing identity so Appium builds and signs WDA itself.
+    """
+    server_url: str = field(default_factory=lambda: _env("APPIUM_URL", "http://127.0.0.1:4723"))
+    xcode_org_id: str = field(default_factory=lambda: _env("APPIUM_TEAM_ID", ""))       # e.g. 8CG9QYMSR5
+    xcode_signing_id: str = field(default_factory=lambda: _env("APPIUM_SIGNING_ID", "Apple Development"))
+    wda_bundle_id: str = field(default_factory=lambda: _env("APPIUM_WDA_BUNDLE", ""))   # e.g. com.you.WebDriverAgentRunner
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.xcode_org_id)
+
+
+@dataclass(frozen=True)
 class Proxyman:
     cli: str = field(default_factory=lambda: _env(
         "PROXYMAN_CLI", "/Applications/Proxyman.app/Contents/MacOS/proxyman-cli"))
@@ -177,6 +194,7 @@ class Config:
     decrypt_device: DecryptDevice = field(default_factory=DecryptDevice)
     ipatool: IpaTool = field(default_factory=IpaTool)
     test_device: TestDevice = field(default_factory=TestDevice)
+    appium: Appium = field(default_factory=Appium)
     proxyman: Proxyman = field(default_factory=Proxyman)
     signing: Signing = field(default_factory=Signing)
     dylibs: Dylibs = field(default_factory=Dylibs)

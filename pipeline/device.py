@@ -122,19 +122,28 @@ class AppiumDriver:
     provided creds, tap a login/sign-in control.
     """
 
-    def __init__(self, server_url: str = "http://127.0.0.1:4723",
+    def __init__(self, server_url: str | None = None,
                  credentials: dict[str, str] | None = None):
-        self.server_url = server_url
+        self.server_url = server_url or CONFIG.appium.server_url
         self.credentials = credentials or {}
 
     def _make_driver(self, bundle_id: str):
         from appium import webdriver
         from appium.options.ios import XCUITestOptions
+        a = CONFIG.appium
         opts = XCUITestOptions()
         opts.udid = _udid()
         opts.bundle_id = bundle_id
         opts.platform_name = "iOS"
         opts.automation_name = "XCUITest"
+        # WDA signing for a real (non-jailbroken) device.
+        if a.xcode_org_id:
+            opts.set_capability("appium:xcodeOrgId", a.xcode_org_id)
+            opts.set_capability("appium:xcodeSigningId", a.xcode_signing_id)
+        if a.wda_bundle_id:
+            opts.set_capability("appium:updatedWDABundleId", a.wda_bundle_id)
+        # Do not reinstall/relaunch the target; we manage install ourselves.
+        opts.set_capability("appium:noReset", True)
         return webdriver.Remote(self.server_url, options=opts)
 
     def drive(self, bundle_id: str, duration: int, login: bool) -> DriveResult:
