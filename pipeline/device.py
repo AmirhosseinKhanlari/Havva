@@ -172,27 +172,153 @@ class AppiumDriver:
         return DriveResult(launched=True, login_status=login_status,
                            crashed=bool(report), crash_report=report)
 
+    # ---- login orchestration -------------------------------------------
+
     def _attempt_login(self, drv) -> str:
+        """Try native email/password first; if there is no form, try the
+        'Sign in with Google' flow. Returns none|attempted|success."""
+        method = self.credentials.get("method", "auto")
+        if method in ("auto", "native"):
+            status = self._login_native(drv)
+            if status != "none":
+                return status
+        if method in ("auto", "google"):
+            return self._login_google(drv)
+        return "none"
+
+    # ---- helpers --------------------------------------------------------
+
+    def _find(self, drv, class_name: str) -> list:
         from appium.webdriver.common.appiumby import AppiumBy
+        try:
+            return drv.find_elements(AppiumBy.CLASS_NAME, class_name)
+        except Exception:
+            return []
+
+    def _tap_label(self, drv, labels: tuple[str, ...]) -> bool:
+        """Tap the first button/element whose label or name matches any of labels
+        (exact accessibility id, then a CONTAINS predicate for robustness)."""
+        from appium.webdriver.common.appiumby import AppiumBy
+        for label in labels:
+            try:
+                els = drv.find_elements(AppiumBy.ACCESSIBILITY_ID, label)
+                if els:
+                    els[0].click()
+                    return True
+            except Exception:
+                pass
+        for label in labels:
+            try:
+                pred = (f"(type == 'XCUIElementTypeButton' OR type == 'XCUIElementTypeStaticText' "
+                        f"OR type == 'XCUIElementTypeOther') AND (label CONTAINS[c] '{label}' "
+                        f"OR name CONTAINS[c] '{label}')")
+                els = drv.find_elements(AppiumBy.IOS_PREDICATE, pred)
+                if els:
+                    els[0].click()
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _accept_native_alert(self, drv) -> None:
+        """iOS shows a native 'App Wants to Use google.com to Sign In' alert;
+        accept it so the web-auth session can open."""
+        try:
+            drv.switch_to.alert.accept()
+            return
+        except Exception:
+            pass
+        self._tap_label(drv, ("Continue", "Allow", "Sign In", "OK"))
+
+    # ---- native email/password -----------------------------------------
+
+    def _login_native(self, drv) -> str:
         user = self.credentials.get("username", "")
         pw = self.credentials.get("password", "")
         if not (user and pw):
             return "none"
+        fields = self._find(drv, "XCUIElementTypeTextField")
+        secure = self._find(drv, "XCUIElementTypeSecureTextField")
+        if not (fields and secure):
+            return "none"
         try:
-            fields = drv.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeTextField")
-            secure = drv.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeSecureTextField")
-            if fields and secure:
-                fields[0].send_keys(user)
-                secure[0].send_keys(pw)
-                for label in ("Log In", "Sign In", "Login", "Continue", "Sign in"):
-                    btns = drv.find_elements(AppiumBy.ACCESSIBILITY_ID, label)
-                    if btns:
-                        btns[0].click()
-                        return "attempted"
-                return "attempted"
+            fields[0].send_keys(user)
+            secure[0].send_keys(pw)
+            self._tap_label(drv, ("Log In", "Sign In", "Login", "Continue", "Sign in", "Next"))
+            return "attempted"
         except Exception:
             return "attempted"
-        return "none"
+
+    # ---- Sign in with Google -------------------------------------------
+
+    def _login_google(self, drv) -> str:
+        """Best-effort 'Sign in with Google'. Works reliably only when the test
+        Google account is already signed into the device's Safari (shared cookies
+        via ASWebAuthenticationSession) or when the app uses an embedded WKWebView.
+        Google's bot detection may still block a re-signed/instrumented app."""
+        import time as _t
+        email = self.credentials.get("google_email") or self.credentials.get("username", "")
+        pw = self.credentials.get("google_password") or self.credentials.get("password", "")
+        # 1. Tap the Google entry button.
+        if not self._tap_label(drv, ("Continue with Google", "Sign in with Google",
+                                     "Sign up with Google", "Log in with Google", "Google")):
+            return "none"
+        _t.sleep(2)
+        # 2. Accept the iOS web-auth consent alert.
+        self._accept_native_alert(drv)
+        _t.sleep(3)
+        # 3a. Safari SSO: an account chooser may show the account by email; tap it.
+        if email and self._tap_label(drv, (email, email.split("@")[0])):
+            _t.sleep(2)
+            self._tap_label(drv, ("Continue", "Allow", "Weiter"))
+            return "success"
+        # 3b. Full Google web login: try the webview context, else the native tree.
+        if email and pw and self._drive_google_web(drv, email, pw):
+            return "success"
+        # 4. Final consent if a session already existed.
+        self._tap_label(drv, ("Continue", "Allow"))
+        return "attempted"
+
+    def _drive_google_web(self, drv, email: str, pw: str) -> bool:
+        """Fill Google's email/password page. Prefers a WEBVIEW context (embedded
+        WKWebView); falls back to the accessibility tree for the web-auth view."""
+        import time as _t
+        from appium.webdriver.common.appiumby import AppiumBy
+        # Try switching into a web context.
+        try:
+            contexts = drv.contexts
+            web = next((c for c in contexts if "WEBVIEW" in c), None)
+            if web:
+                drv.switch_to.context(web)
+                try:
+                    e = drv.find_element(AppiumBy.CSS_SELECTOR, "input[type=email], #identifierId")
+                    e.send_keys(email)
+                    drv.find_element(AppiumBy.ID, "identifierNext").click(); _t.sleep(2)
+                    p = drv.find_element(AppiumBy.CSS_SELECTOR, "input[type=password], input[name=Passwd]")
+                    p.send_keys(pw)
+                    drv.find_element(AppiumBy.ID, "passwordNext").click(); _t.sleep(3)
+                    return True
+                finally:
+                    drv.switch_to.context("NATIVE_APP")
+        except Exception:
+            try:
+                drv.switch_to.context("NATIVE_APP")
+            except Exception:
+                pass
+        # Fallback: the web-auth view sometimes exposes fields in the native tree.
+        try:
+            tf = self._find(drv, "XCUIElementTypeTextField")
+            if tf:
+                tf[0].send_keys(email)
+                self._tap_label(drv, ("Next", "Weiter")); _t.sleep(2)
+            sf = self._find(drv, "XCUIElementTypeSecureTextField")
+            if sf:
+                sf[0].send_keys(pw)
+                self._tap_label(drv, ("Next", "Weiter", "Sign in")); _t.sleep(3)
+                return True
+        except Exception:
+            return False
+        return False
 
     def _exercise(self, drv, deadline: float) -> None:
         from appium.webdriver.common.appiumby import AppiumBy
