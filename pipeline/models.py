@@ -80,10 +80,23 @@ class TlsStack(str, Enum):
 
 
 class BackendBehavior(str, Enum):
-    """Attestation differential-test result."""
+    """Attestation differential-test result (coarse, kept for compatibility)."""
     FAIL_CLOSED = "fail_closed"      # refuses without valid attestation (real defense)
     FAIL_OPEN = "fail_open"          # serves anyway (adopted but not enforced)
     INCONCLUSIVE = "inconclusive"    # could not reach/observe gated action
+
+
+class EnforcementVerdict(str, Enum):
+    """Graded App Attest enforcement strength (the probe-battery result)."""
+    ENFORCED = "enforced"                        # every tampered probe was refused
+    NOT_REQUIRED = "not_required"                # gated data served with no assertion at all
+    SIGNATURE_NOT_VERIFIED = "signature_not_verified"  # a garbage assertion was accepted
+    NOT_REGISTERED_OK = "not_registered_ok"      # served without ever registering a key
+    DOWNGRADEABLE = "downgradeable"              # served via the unsupported-device fallback
+    REPLAYABLE = "replayable"                    # an old assertion was accepted (counter unchecked)
+    PARTIAL_COVERAGE = "partial_coverage"        # some sensitive endpoints carry no assertion
+    WEAK_OTHER = "weak_other"                    # some probe served, cause not pinned down
+    INCONCLUSIVE = "inconclusive"                # never reached gated data even intact
 
 
 @dataclass

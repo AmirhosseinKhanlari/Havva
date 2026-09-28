@@ -1,34 +1,54 @@
-"""Stage H: attestation-enforcement differential test (the headline).
+"""Stage H: App Attest enforcement measurement (graded probe battery).
 
-For apps that use App Attest / DeviceCheck, we test whether the backend actually
-enforces it. On a real logged-in session with pinning bypassed so we can see the
-traffic:
+Weak server-side enforcement is a *backend behavior*, so it can only be measured
+by testing the backend's response, never from the binary. For each App-Attest app
+with a test account, we reach a gated action logged in (pinning bypassed so we can
+see the traffic) and run a battery of probes, each defeating attestation a
+different way, then grade how the backend reacts:
 
-  baseline  : attestation intact, reach the gated action -> confirm gated data flows
-  neutralized: attestation hooked off (scripts/attest_neutralize.js), same action
+  baseline   : attestation intact          -> must serve gated data (else INCONCLUSIVE)
+  omit       : no assertion sent           -> served? => NOT_REQUIRED
+  tamper     : garbage assertion           -> served? => SIGNATURE_NOT_VERIFIED
+  noreg      : key never registered        -> served? => NOT_REGISTERED_OK
+  downgrade  : App Attest reported unsupported -> served? => DOWNGRADEABLE
 
-If gated data still flows with attestation neutralized -> FAIL_OPEN (adopted but
-not enforced, theater). If the backend now refuses -> FAIL_CLOSED (real defense).
-Enforcement is a backend property, so this is valid on the non-JB device.
+Plus a coverage map from the baseline flows: which gated endpoints actually carry
+an assertion (partial coverage is the most common real bug).
 
-Runs only on the authenticated sample: apps with a test account in the accounts
-store (results/accounts.json: {app_id or bundle_id: {username, password}}).
+On-device caveats (validate when running): the probe Frida script must load
+before the gated action fires; the backend may remember a key registered by an
+earlier run on the same account (affects `noreg`); replay is not automated here.
+These are noted, not hidden.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from . import capture, device, instrument
 from .config import CONFIG
 from .db import Database
-from .models import BackendBehavior, BypassStage, Stage, WorkState
+from .models import BackendBehavior, BypassStage, EnforcementVerdict, Stage, WorkState
 from .util import get_logger, run_cmd
 
 log = get_logger("attestation", CONFIG.paths.log_dir)
 
-ATTEST_SCRIPT = CONFIG.paths.root / "scripts" / "attest_neutralize.js"
+SCRIPTS = CONFIG.paths.root / "scripts"
+
+# (probe name, frida script or None for the intact baseline)
+PROBES: list[tuple[str, Path | None]] = [
+    ("baseline", None),
+    ("omit", SCRIPTS / "attest_omit.js"),
+    ("tamper", SCRIPTS / "attest_tamper.js"),
+    ("noreg", SCRIPTS / "attest_noreg.js"),
+    ("downgrade", SCRIPTS / "attest_downgrade.js"),
+]
+
+# Request headers that plausibly carry an attestation assertion/token.
+_ASSERT_HEADER_RE = re.compile(r"assert|attest|integrity|device-?check|app-?check|x-.*token",
+                               re.IGNORECASE)
 
 
 def load_accounts() -> dict[str, dict[str, str]]:
@@ -45,9 +65,9 @@ def _creds_for(row, accounts: dict) -> dict[str, str] | None:
     return accounts.get(row["app_id"]) or accounts.get(row["bundle_id"] or "")
 
 
-def _backend_served_data(flows: list) -> bool:
-    """Heuristic: a successful (2xx) response from a non-excluded host with a
-    non-trivial body = gated data was served."""
+def _served_gated_data(flows: list) -> bool:
+    """A 2xx response from a non-excluded host with a non-trivial body = gated
+    data was served."""
     for f in flows:
         if 200 <= f.status < 300 and f.host and not capture.is_excluded(f.host):
             if len(f.response_body or "") > 64:
@@ -55,12 +75,29 @@ def _backend_served_data(flows: list) -> bool:
     return False
 
 
-def _run_once(app_id: str, bundle_id: str, decrypted: str, creds: dict,
-              neutralize: bool) -> list:
-    """One logged-in run with pinning bypassed; optionally neutralize attestation.
-    Returns captured flows."""
-    # Use the Frida-gadget config so we can both bypass pinning and load the
-    # neutralization script over USB.
+def _coverage(flows: list) -> tuple[int, int]:
+    """(gated_endpoints, of_which_carry_an_assertion). Coverage ratio = 2nd/1st."""
+    gated = attested = 0
+    seen: set[str] = set()
+    for f in flows:
+        if not (200 <= f.status < 300 and f.host and not capture.is_excluded(f.host)):
+            continue
+        if len(f.response_body or "") <= 64:
+            continue
+        key = f.host + (f.url.split("?")[0][-40:])
+        if key in seen:
+            continue
+        seen.add(key)
+        gated += 1
+        if any(_ASSERT_HEADER_RE.search(h) for h in f.request_headers):
+            attested += 1
+    return gated, attested
+
+
+def _run_probe(app_id: str, bundle_id: str, decrypted: str, creds: dict,
+               script: Path | None) -> list:
+    """One logged-in run under the Frida-gadget config, optionally loading a probe
+    script, then capture. Returns flows."""
     ok, signed, err = instrument.build(app_id, decrypted, BypassStage.FRIDA.value)
     if not ok:
         log.warning("%s attest build failed: %s", app_id, err)
@@ -74,71 +111,114 @@ def _run_once(app_id: str, bundle_id: str, decrypted: str, creds: dict,
     capture.clear_session()
 
     driver = device.AppiumDriver(credentials=creds)
-    # Launch + login first.
     dr = driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=True)
-
-    if neutralize and dr.launched:
-        # Load the neutralization script into the running gadget, then re-exercise.
-        run_cmd(["frida", "-U", "-n", "Gadget", "-l", str(ATTEST_SCRIPT),
-                 "--runtime=v8", "-q"], timeout=30)
+    if script and script.exists() and dr.launched:
+        # Load the probe into the running gadget, then re-exercise so the gated
+        # request fires with the probe active.
+        run_cmd(["frida", "-U", "-n", "Gadget", "-l", str(script), "-q"], timeout=30)
         driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=False)
 
-    har_path = CONFIG.paths.results_dir / f"{app_id}_attest_{'neu' if neutralize else 'base'}.har"
-    capture.export_har(har_path)
-    flows = capture.har_to_flows(capture.load_har(har_path), CONFIG.test_device.client_ip)
+    tag = script.stem if script else "baseline"
+    har = CONFIG.paths.results_dir / f"{app_id}_attest_{tag}.har"
+    capture.export_har(har)
+    flows = capture.har_to_flows(capture.load_har(har), CONFIG.test_device.client_ip)
     device.uninstall(bundle_id)
     return flows
 
 
-def process_app(db: Database, row, accounts: dict) -> BackendBehavior:
-    app_id = row["app_id"]
-    bundle_id = row["bundle_id"]
+def _grade(served: dict[str, bool], coverage: tuple[int, int]) -> EnforcementVerdict:
+    if not served.get("baseline"):
+        return EnforcementVerdict.INCONCLUSIVE
+    # Strongest evidence first: a garbage assertion accepted = no verification.
+    if served.get("tamper"):
+        return EnforcementVerdict.SIGNATURE_NOT_VERIFIED
+    if served.get("omit"):
+        return EnforcementVerdict.NOT_REQUIRED
+    if served.get("noreg"):
+        return EnforcementVerdict.NOT_REGISTERED_OK
+    if served.get("downgrade"):
+        return EnforcementVerdict.DOWNGRADEABLE
+    if any(v for k, v in served.items() if k != "baseline"):
+        return EnforcementVerdict.WEAK_OTHER
+    # All tamper probes refused. Check coverage: are all gated endpoints attested?
+    gated, attested = coverage
+    if gated > 0 and 0 < attested < gated:
+        return EnforcementVerdict.PARTIAL_COVERAGE
+    return EnforcementVerdict.ENFORCED
+
+
+def _to_behavior(v: EnforcementVerdict) -> BackendBehavior:
+    if v is EnforcementVerdict.ENFORCED:
+        return BackendBehavior.FAIL_CLOSED
+    if v is EnforcementVerdict.INCONCLUSIVE:
+        return BackendBehavior.INCONCLUSIVE
+    return BackendBehavior.FAIL_OPEN  # any weakness = effectively fails open
+
+
+def process_app(db: Database, row, accounts: dict) -> EnforcementVerdict:
+    app_id, bundle_id = row["app_id"], row["bundle_id"]
     creds = _creds_for(row, accounts)
     with db.connect() as c:
         ac = c.execute("SELECT ipa_path FROM acquisition WHERE app_id=?", (app_id,)).fetchone()
     decrypted = ac["ipa_path"] if ac else ""
 
     if not creds or not decrypted:
-        db.save_attestation(app_id, tested=False, neutralized=False,
-                            behavior=BackendBehavior.INCONCLUSIVE,
-                            state=WorkState.UNTESTED, error="no account or ipa")
-        return BackendBehavior.INCONCLUSIVE
+        _save(db, app_id, EnforcementVerdict.INCONCLUSIVE, {}, (0, 0),
+              WorkState.UNTESTED, "no account or ipa")
+        return EnforcementVerdict.INCONCLUSIVE
 
-    base_flows = _run_once(app_id, bundle_id, decrypted, creds, neutralize=False)
-    if not _backend_served_data(base_flows):
-        # Never reached the gated data even with attestation intact: cannot judge.
-        db.save_attestation(app_id, tested=True, neutralized=False,
-                            behavior=BackendBehavior.INCONCLUSIVE,
-                            state=WorkState.UNTESTED, error="gated data not reached")
-        return BackendBehavior.INCONCLUSIVE
+    served: dict[str, bool] = {}
+    baseline_flows: list = []
+    for name, script in PROBES:
+        flows = _run_probe(app_id, bundle_id, decrypted, creds, script)
+        served[name] = _served_gated_data(flows)
+        if name == "baseline":
+            baseline_flows = flows
+            if not served["baseline"]:
+                _save(db, app_id, EnforcementVerdict.INCONCLUSIVE, served, (0, 0),
+                      WorkState.UNTESTED, "gated data not reached")
+                return EnforcementVerdict.INCONCLUSIVE
 
-    neu_flows = _run_once(app_id, bundle_id, decrypted, creds, neutralize=True)
-    served = _backend_served_data(neu_flows)
-    behavior = BackendBehavior.FAIL_OPEN if served else BackendBehavior.FAIL_CLOSED
-    db.save_attestation(app_id, tested=True, neutralized=True, behavior=behavior,
-                        state=WorkState.POSITIVE)
-    log.info("%s attestation -> %s", app_id, behavior.value)
-    return behavior
+    coverage = _coverage(baseline_flows)
+    verdict = _grade(served, coverage)
+    _save(db, app_id, verdict, served, coverage, WorkState.POSITIVE)
+    log.info("%s attestation -> %s  (served=%s coverage=%s)", app_id, verdict.value,
+             served, coverage)
+    return verdict
+
+
+def _save(db: Database, app_id: str, verdict: EnforcementVerdict, served: dict,
+          coverage: tuple[int, int], state: WorkState, error: str = "") -> None:
+    db.add_column_if_missing("attestation", "verdict", "TEXT")
+    db.add_column_if_missing("attestation", "probe_results", "TEXT")
+    db.add_column_if_missing("attestation", "coverage_gated", "INTEGER DEFAULT 0")
+    db.add_column_if_missing("attestation", "coverage_attested", "INTEGER DEFAULT 0")
+    behavior = _to_behavior(verdict)
+    db.save_attestation(app_id, tested=(verdict is not EnforcementVerdict.INCONCLUSIVE),
+                        neutralized=bool(served), behavior=behavior, state=state, error=error)
+    with db.connect() as c:
+        c.execute("UPDATE attestation SET verdict=?, probe_results=?, coverage_gated=?, "
+                  "coverage_attested=? WHERE app_id=?",
+                  (verdict.value, json.dumps(served), coverage[0], coverage[1], app_id))
 
 
 def run(db: Database, limit: int | None = None) -> dict[str, int]:
-    missing = CONFIG.missing_for_dynamic()
-    if missing:
-        log.error("cannot run attestation stage; missing: %s", "; ".join(missing))
+    if CONFIG.missing_for_dynamic():
+        log.error("cannot run attestation; missing: %s", "; ".join(CONFIG.missing_for_dynamic()))
         return {}
     accounts = load_accounts()
     if not accounts:
-        log.warning("no accounts.json; attestation test needs per-app test accounts")
+        log.warning("no results/accounts.json; attestation needs per-app test accounts")
     rows = db.apps_needing(Stage.ATTESTATION_DONE)
     if limit:
         rows = rows[:limit]
     tally: dict[str, int] = {}
     for row in rows:
         try:
-            b = process_app(db, row, accounts)
-            if b in (BackendBehavior.FAIL_OPEN, BackendBehavior.FAIL_CLOSED):
+            v = process_app(db, row, accounts)
+            if v is not EnforcementVerdict.INCONCLUSIVE:
                 db.set_stage(row["app_id"], Stage.ATTESTATION_DONE)
-            tally[b.value] = tally.get(b.value, 0) + 1
+            tally[v.value] = tally.get(v.value, 0) + 1
         except Exception as e:
             log.exception("attestation %s failed: %s", row["app_id"], e)
     log.info("attestation tally: %s", tally)

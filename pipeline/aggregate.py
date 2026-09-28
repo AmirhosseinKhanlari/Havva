@@ -60,6 +60,14 @@ def compute(db: Database) -> dict:
         att_tested = scalar("SELECT COUNT(*) FROM attestation WHERE work_state!=0")
         fail_open = scalar("SELECT COUNT(*) FROM attestation WHERE backend_behavior='fail_open'")
         fail_closed = scalar("SELECT COUNT(*) FROM attestation WHERE backend_behavior='fail_closed'")
+        # Graded enforcement verdicts (added by the probe battery; may be absent).
+        verdicts: dict[str, int] = {}
+        try:
+            verdicts = {r["verdict"]: r["n"] for r in c.execute(
+                "SELECT verdict, COUNT(*) n FROM attestation WHERE verdict IS NOT NULL "
+                "GROUP BY verdict")}
+        except Exception:
+            verdicts = {}
 
     return {
         "corpus": {"total_apps": total_apps, "static_analyzed": static_done},
@@ -79,6 +87,7 @@ def compute(db: Database) -> dict:
             "tested": att_tested, "fail_open": fail_open, "fail_closed": fail_closed,
             "enforced_pct_of_tested": _pct(fail_closed, att_tested),
             "not_enforced_pct_of_tested": _pct(fail_open, att_tested),
+            "enforcement_verdicts": verdicts,
         },
     }
 
