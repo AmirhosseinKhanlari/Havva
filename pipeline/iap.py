@@ -12,6 +12,7 @@ apps.has_iap. Concurrent, since it is 7k+ page fetches.
 from __future__ import annotations
 
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -55,13 +56,21 @@ def check_has_iap(app_id: str, country: str, session: requests.Session | None = 
     """True/False if determined, None on fetch failure (retry later)."""
     url = f"https://apps.apple.com/{country.lower()}/app/id{app_id}"
     getter = session or requests
-    try:
-        r = getter.get(url, headers=_HEADERS, timeout=20)
-        if r.status_code == 404:
-            return False
-        r.raise_for_status()
-        html = r.text
-    except requests.RequestException:
+    html = ""
+    for attempt in range(3):
+        try:
+            r = getter.get(url, headers=_HEADERS, timeout=20)
+            if r.status_code == 404:
+                return False
+            if r.status_code in (429, 403, 503):  # throttled: back off and retry
+                time.sleep(2 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            html = r.text
+            break
+        except requests.RequestException:
+            time.sleep(1.5 * (attempt + 1))
+    if not html:
         return None
     # Scope to the app's own info line. A plain full-page search is contaminated
     # by the always-present JSON key "inAppPurchases" and the related-apps
