@@ -68,6 +68,13 @@ def cmd_aggregate(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_iap(args: argparse.Namespace) -> int:
+    from . import iap
+    db = Database(CONFIG.paths.db)
+    print(iap.run(db, limit=args.limit, workers=args.workers))
+    return 0
+
+
 def cmd_export(_args: argparse.Namespace) -> int:
     db = Database(CONFIG.paths.db)
     out_dir = CONFIG.paths.results_dir
@@ -166,6 +173,11 @@ def main() -> int:
     p_att.set_defaults(func=cmd_attest)
 
     sub.add_parser("aggregate", help="compute metrics + write summary").set_defaults(func=cmd_aggregate)
+    p_iap = sub.add_parser("iap", help="detect in-app purchases via App Store pages")
+    p_iap.add_argument("--limit", type=int, help="max apps this run")
+    p_iap.add_argument("--workers", type=int, default=12, help="concurrent fetchers")
+    p_iap.set_defaults(func=cmd_iap)
+
     sub.add_parser("export", help="write app_ids.txt + app_list.txt from the corpus").set_defaults(func=cmd_export)
     args = parser.parse_args()
     return args.func(args)
