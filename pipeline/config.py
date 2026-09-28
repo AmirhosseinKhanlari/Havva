@@ -98,6 +98,15 @@ class DecryptDevice:
     # Path to the ipadecrypt helper/CLI as invoked from the Mac host.
     ipadecrypt_cmd: str = field(default_factory=lambda: _env("IPADECRYPT_CMD", "ipadecrypt"))
 
+    @property
+    def bootstrap_config(self) -> Path:
+        """ipadecrypt stores device/App-Store setup here after `bootstrap`."""
+        return Path.home() / ".ipadecrypt" / "config.json"
+
+    @property
+    def is_bootstrapped(self) -> bool:
+        return self.bootstrap_config.exists()
+
 
 @dataclass(frozen=True)
 class TestDevice:
@@ -163,8 +172,9 @@ class Config:
             missing.append("TEST_DEVICE_UDID (iPhone XR udid from `idevice_id -l`)")
         if not self.test_device.client_ip:
             missing.append("TEST_DEVICE_IP (XR IP on the test network)")
-        if not self.decrypt_device.ssh_host:
-            missing.append("DECRYPT_SSH_HOST (jailbroken iPhone 8 SSH address)")
+        if not self.decrypt_device.is_bootstrapped:
+            missing.append("ipadecrypt not bootstrapped (run `ipadecrypt bootstrap` once; "
+                           "creates ~/.ipadecrypt/config.json)")
         if not (self.signing.pem.exists() or self.signing.p12.exists()):
             missing.append("signing cert (SIGN_PEM or SIGN_P12)")
         if not self.signing.mobileprovision.exists():
