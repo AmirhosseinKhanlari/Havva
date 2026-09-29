@@ -101,18 +101,23 @@ def _ipatool_login() -> bool:
     return False
 
 
-def download_with_ipatool(app_id: str, row) -> tuple[bool, str, str]:
+def download_with_ipatool(app_id: str, row, purchase: bool = False,
+                          auth_code: str = "") -> tuple[bool, str, str]:
     """Download the still-encrypted IPA with ipatool by bundle id or numeric app
-    id. Returns (ok, path, error)."""
+    id. Returns (ok, path, error).
+
+    purchase=False (default): plain download, works for apps ALREADY in the
+      account's library; never triggers a purchase (so no 'auth code required').
+    purchase=True: obtain the license first (needed for unowned apps); Apple may
+      require an --auth-code, pass it via auth_code.
+    """
     bundle = _field(row, "bundle_id")
     store_id = _field(row, "store_id")
     if not store_id:
-        # fall back to app_id if it is a numeric App Store id
         cand = str(_field(row, "app_id") or "")
         store_id = cand if cand.isdigit() else None
     enc = CONFIG.paths.work_dir / f"{app_id}.enc.ipa"
     enc.parent.mkdir(parents=True, exist_ok=True)
-    # Identifier flags (bundle id overrides numeric app id).
     if bundle:
         idflags = ["-b", bundle]
     elif store_id:
@@ -120,30 +125,34 @@ def download_with_ipatool(app_id: str, row) -> tuple[bool, str, str]:
     else:
         return False, "", "ipatool needs a bundle id or numeric app id"
 
-    ident = bundle or f"id{store_id}"
-    # 1. Obtain the license first (free apps must be "purchased" to the account).
-    #    Best-effort: an already-owned app or an Apple throttle is non-fatal here
-    #    because `download --purchase` also licenses on the fly.
-    log.info("  [1/2] ipatool: obtaining license for %s", ident)
-    pr = run_cmd([CONFIG.ipatool.cmd, "purchase", *idflags, "--non-interactive"], timeout=120)
-    if not pr.ok:
-        log.info("        purchase best-effort: %s (continuing; download will license)",
-                 _short_reason(pr.stderr or pr.stdout))
-    else:
-        log.info("        license obtained")
+    auth = ["--auth-code", auth_code] if auth_code else []
 
-    # 2. Download the (now-licensed) encrypted IPA.
-    log.info("  [2/2] ipatool: downloading encrypted IPA ...")
-    p = run_cmd([CONFIG.ipatool.cmd, "download", *idflags, "-o", str(enc),
-                 "--purchase", "--non-interactive"], timeout=900)
+    if purchase:
+        log.info("  [1/2] ipatool: obtaining license (purchase) ...")
+        pr = run_cmd([CONFIG.ipatool.cmd, "purchase", *idflags, *auth, "--non-interactive"],
+                     timeout=120)
+        low = (pr.stdout + " " + pr.stderr).lower()
+        if not pr.ok and "auth code" in low:
+            return False, "", "purchase needs 2FA/auth code (unowned app)"
+        if not pr.ok and not any(m in low for m in ("already", "owned", "licen")):
+            log.info("        purchase note: %s", _short_reason(pr.stderr or pr.stdout))
+        else:
+            log.info("        license ok")
+
+    log.info("  %s ipatool: downloading encrypted IPA ...", "[2/2]" if purchase else "[1/1]")
+    dl = [CONFIG.ipatool.cmd, "download", *idflags, "-o", str(enc), "--non-interactive"]
+    if purchase:
+        dl.append("--purchase")
+        dl += auth
+    p = run_cmd(dl, timeout=900)
     if enc.exists() and enc.stat().st_size > 0:
         log.info("        downloaded %.1f MB", _mb(enc))
         return True, str(enc), ""
     return False, "", (p.stderr or p.stdout or "ipatool download failed")[:300]
 
 
-def decrypt_one(app_id: str, row, from_appstore: bool = False,
-                timeout: int = 900) -> tuple[WorkState, str, str]:
+def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = False,
+                auth_code: str = "", timeout: int = 900) -> tuple[WorkState, str, str]:
     """Acquire + decrypt one app. Returns (work_state, ipa_path, error).
 
     Two modes (config.acquire_mode):
@@ -162,7 +171,7 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False,
     country = _field(row, "country") or "us"
     ident = _identifier(row)
     if CONFIG.acquire_mode == "ipatool":
-        ok, enc_path, err = download_with_ipatool(app_id, row)
+        ok, enc_path, err = download_with_ipatool(app_id, row, purchase=purchase, auth_code=auth_code)
         if not ok:
             low = err.lower()
             if any(m in low for m in _PERMANENT):
@@ -208,7 +217,8 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False,
 
 
 def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None = None,
-                country: str = "us", from_appstore: bool = False) -> tuple[WorkState, str, str]:
+                country: str = "us", from_appstore: bool = False, purchase: bool = False,
+                auth_code: str = "") -> tuple[WorkState, str, str]:
     """Download + install + decrypt ONE specific app by bundle id and/or numeric
     App Store id. At least one identifier is required. Returns
     (work_state, ipa_path, error) and records it in the DB like the corpus path."""
@@ -221,8 +231,9 @@ def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None =
     key = bundle_id or str(app_id)          # DB primary key / output filename
     row = {"app_id": key, "bundle_id": bundle_id, "country": country, "store_id": app_id}
     label = bundle_id or f"id{app_id}"
-    log.info("== acquire %s (%s) ==", label, country.upper())
-    state, path, err = decrypt_one(key, row, from_appstore)
+    log.info("== acquire %s (%s)%s ==", label, country.upper(),
+             " [purchase]" if purchase else "")
+    state, path, err = decrypt_one(key, row, from_appstore, purchase=purchase, auth_code=auth_code)
     db.upsert_app(key, country, bundle_id=bundle_id)
     db.save_acquisition(key, state, ipa_path=path, error=err)
     if state == WorkState.POSITIVE:
@@ -233,7 +244,8 @@ def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None =
     return state, path, err
 
 
-def run(db: Database, limit: int | None = None, from_appstore: bool = False) -> dict[str, int]:
+def run(db: Database, limit: int | None = None, from_appstore: bool = False,
+        purchase: bool = False) -> dict[str, int]:
     """Acquire all apps still needing decryption. Resumable via the work queue."""
     if not CONFIG.decrypt_device.is_bootstrapped:
         log.error("ipadecrypt not bootstrapped. Run `%s bootstrap` first.",
@@ -255,7 +267,7 @@ def run(db: Database, limit: int | None = None, from_appstore: bool = False) -> 
         ident = _identifier(row)
         stats["attempted"] += 1
         log.info("[%d/%d] == acquire %s ==", i, total, ident)
-        state, path, err = decrypt_one(app_id, row, from_appstore)
+        state, path, err = decrypt_one(app_id, row, from_appstore, purchase=purchase)
         db.save_acquisition(app_id, state, ipa_path=path, error=err)
         if state == WorkState.POSITIVE:
             db.set_stage(app_id, Stage.ACQUIRED)

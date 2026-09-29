@@ -37,7 +37,8 @@ def cmd_acquire(args: argparse.Namespace) -> int:
     db = Database(CONFIG.paths.db)
     if args.bundle or args.app_id:
         state, path, err = acquire.acquire_one(db, bundle_id=args.bundle, app_id=args.app_id,
-                                               country=args.country, from_appstore=args.from_appstore)
+                                               country=args.country, from_appstore=args.from_appstore,
+                                               purchase=args.purchase, auth_code=args.auth_code or "")
         if state.name == "POSITIVE":
             import os
             mb = os.path.getsize(path) / (1024 * 1024) if path and os.path.exists(path) else 0
@@ -45,7 +46,8 @@ def cmd_acquire(args: argparse.Namespace) -> int:
             return 0
         print(f"\n✗ {state.name}  {args.bundle or args.app_id}: {err or '-'}")
         return 1
-    stats = acquire.run(db, limit=args.limit, from_appstore=args.from_appstore)
+    stats = acquire.run(db, limit=args.limit, from_appstore=args.from_appstore,
+                        purchase=args.purchase)
     print(stats)
     return 0
 
@@ -184,6 +186,10 @@ def main() -> int:
     p_acq.add_argument("--bundle", help="acquire ONE specific app by bundle id (e.g. com.calm.calmapp)")
     p_acq.add_argument("--app-id", help="optional App Store numeric id for the single app")
     p_acq.add_argument("--country", default="us", help="storefront for single-app acquire (default us)")
+    p_acq.add_argument("--purchase", action="store_true",
+                       help="obtain a license for unowned apps (may need --auth-code); "
+                            "default off = download owned apps only, no purchase")
+    p_acq.add_argument("--auth-code", help="Apple 2FA/verification code for --purchase")
     p_acq.add_argument("--from-appstore", action="store_true", help="force App Store fetch")
     p_acq.set_defaults(func=cmd_acquire)
 
