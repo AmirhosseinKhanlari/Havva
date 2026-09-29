@@ -105,6 +105,13 @@ def app_tab(app_id: str, tab: str, request: Request, _: None = Depends(require_a
 
 # ---- actions (each submits a job) ----
 
+def _watch(request: Request, app_id: str, job_id: int, tab: str):
+    """Render the live job-watch widget that self-polls and, on completion,
+    reloads the given tab into #tab-content and fires a browser notification."""
+    return templates.TemplateResponse(request, "_job_watch.html", {
+        "request": request, "job": get_db().get_job(job_id),
+        "reload": f"/app/{app_id}/tab/{tab}"})
+
 @router.post("/app/{app_id}/acquire")
 def act_acquire(app_id: str, request: Request, version: str = Form(default=""),
                 _: None = Depends(require_auth)):
@@ -126,10 +133,9 @@ def act_acquire(app_id: str, request: Request, version: str = Form(default=""),
                 country=app["country"] or "us", app_ver_id=version or None)
         ctx.log(f"result: {state.name} {path or err}\n")
 
-    get_jobs_manager().submit("acquire", app_id, job, device_bound=True,
-                              params={"version": version})
-    return templates.TemplateResponse(request, "_action_queued.html",
-                                      {"request": request, "app_id": app_id, "what": "acquire"})
+    jid = get_jobs_manager().submit("acquire", app_id, job, device_bound=True,
+                                    params={"version": version})
+    return _watch(request, app_id, jid, "acquire")
 
 
 @router.get("/app/{app_id}/versions")
@@ -170,9 +176,8 @@ def act_classify(app_id: str, request: Request, _: None = Depends(require_auth))
             ctx.log(f"pinned={prof.pins_flag} layer={prof.pin_layer} "
                     f"library={prof.pin_library} attest={prof.appattest_flag}\n")
 
-    get_jobs_manager().submit("static", app_id, job, device_bound=False)
-    return templates.TemplateResponse(request, "_action_queued.html",
-                                      {"request": request, "app_id": app_id, "what": "classify"})
+    jid = get_jobs_manager().submit("static", app_id, job, device_bound=False)
+    return _watch(request, app_id, jid, "static")
 
 
 @router.post("/app/{app_id}/analyze")
@@ -184,9 +189,8 @@ def act_analyze(app_id: str, request: Request, _: None = Depends(require_auth)):
         with tee_pipeline_logs(ctx):
             analysis.analyze_one(get_db(), app_id, log_fn=ctx.log)
 
-    get_jobs_manager().submit("deep_analyze", app_id, job, device_bound=False)
-    return templates.TemplateResponse(request, "_action_queued.html",
-                                      {"request": request, "app_id": app_id, "what": "analyze"})
+    jid = get_jobs_manager().submit("deep_analyze", app_id, job, device_bound=False)
+    return _watch(request, app_id, jid, "static")
 
 
 @router.post("/app/{app_id}/dynamic")
@@ -200,9 +204,8 @@ def act_dynamic(app_id: str, request: Request, _: None = Depends(require_auth)):
             label = dynamic.process_app(get_db(), row, driver)
             ctx.log(f"outcome: {getattr(label, 'value', label)}\n")
 
-    get_jobs_manager().submit("dynamic", app_id, job, device_bound=True)
-    return templates.TemplateResponse(request, "_action_queued.html",
-                                      {"request": request, "app_id": app_id, "what": "dynamic"})
+    jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True)
+    return _watch(request, app_id, jid, "dynamic")
 
 
 @router.post("/app/{app_id}/attest")
@@ -216,6 +219,5 @@ def act_attest(app_id: str, request: Request, _: None = Depends(require_auth)):
             v = attestation.process_app(get_db(), row, accounts)
             ctx.log(f"verdict: {getattr(v, 'value', v)}\n")
 
-    get_jobs_manager().submit("attest", app_id, job, device_bound=True)
-    return templates.TemplateResponse(request, "_action_queued.html",
-                                      {"request": request, "app_id": app_id, "what": "attest"})
+    jid = get_jobs_manager().submit("attest", app_id, job, device_bound=True)
+    return _watch(request, app_id, jid, "attest")

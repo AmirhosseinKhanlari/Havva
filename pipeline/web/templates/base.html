@@ -12,6 +12,12 @@
     function setTheme(t){try{localStorage.setItem('satella-theme',t);}catch(e){}
       if(t==='auto')document.documentElement.removeAttribute('data-theme');
       else document.documentElement.setAttribute('data-theme',t);}
+    // Ask for notification permission on the first click (a user gesture), so
+    // job-completion notifications can fire.
+    document.addEventListener('click', function once(){
+      try{ if(window.Notification && Notification.permission==='default') Notification.requestPermission(); }catch(e){}
+      document.removeEventListener('click', once);
+    });
   </script>
 </head>
 <body>

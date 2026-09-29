@@ -33,6 +33,22 @@ def jobs_stream(job_id: int, _: None = Depends(require_auth)):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+@router.get("/jobs/{job_id}/watch")
+def jobs_watch(job_id: int, request: Request, reload: str = "",
+               _: None = Depends(require_auth)):
+    """Self-polling job widget. Renders progress; when the job is terminal it
+    stops polling and (client-side) reloads `reload` into #tab-content + notifies."""
+    job = get_db().get_job(job_id)
+    if not job:
+        return templates.TemplateResponse(request, "_job_watch.html",
+                                          {"request": request,
+                                           "job": {"id": job_id, "kind": "job",
+                                                   "target": "", "state": "failed",
+                                                   "progress_pct": 0}, "reload": reload})
+    return templates.TemplateResponse(request, "_job_watch.html",
+                                      {"request": request, "job": job, "reload": reload})
+
+
 @router.post("/jobs/{job_id}/cancel")
 def jobs_cancel(job_id: int, request: Request, _: None = Depends(require_auth)):
     get_jobs_manager().cancel(job_id)
