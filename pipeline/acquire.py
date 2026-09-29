@@ -13,6 +13,9 @@ next run retries.
 
 from __future__ import annotations
 
+import os
+import re
+
 from .config import CONFIG
 from .db import Database
 from .models import Stage, WorkState
@@ -32,6 +35,48 @@ def _field(row, key):
         return row[key]
     except (KeyError, IndexError):
         return None
+
+
+def _mb(path) -> float:
+    try:
+        return os.path.getsize(path) / (1024 * 1024)
+    except OSError:
+        return 0.0
+
+
+def _short_reason(text: str) -> str:
+    """Condense a noisy ipatool/ipadecrypt error to one clean phrase."""
+    t = (text or "").lower()
+    if "301" in t or "another network" in t or "no usable authentication" in t:
+        return "Apple auth throttled (HTTP 301)"
+    if "already" in t or "owned" in t or "licen" in t:
+        return "already owned"
+    if "not found" in t or "404" in t:
+        return "not found"
+    if "429" in t or "rate" in t:
+        return "rate limited (429)"
+    # first non-empty line, trimmed
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:120]
+    return "unknown"
+
+
+_IPADEC_OK = re.compile(r"decrypted (\d+) image\(s\)[^\n]*?\(([\d.]+ [KMG]B)", re.IGNORECASE)
+_IPADEC_VERIFIED = re.compile(r"(\d+) Mach-O\(s\) verified", re.IGNORECASE)
+
+
+def _ipadecrypt_summary(stdout: str) -> str:
+    """Human summary from ipadecrypt output, e.g. '6 images, 108.0 MB, 11 Mach-Os verified'."""
+    parts = []
+    m = _IPADEC_OK.search(stdout or "")
+    if m:
+        parts.append(f"{m.group(1)} images, {m.group(2)}")
+    v = _IPADEC_VERIFIED.search(stdout or "")
+    if v:
+        parts.append(f"{v.group(1)} Mach-Os verified")
+    return ", ".join(parts) if parts else "decrypted"
 
 
 def _identifier(row) -> str:
@@ -75,17 +120,24 @@ def download_with_ipatool(app_id: str, row) -> tuple[bool, str, str]:
     else:
         return False, "", "ipatool needs a bundle id or numeric app id"
 
+    ident = bundle or f"id{store_id}"
     # 1. Obtain the license first (free apps must be "purchased" to the account).
-    #    Best-effort: an already-owned app returns an error we intentionally ignore.
+    #    Best-effort: an already-owned app or an Apple throttle is non-fatal here
+    #    because `download --purchase` also licenses on the fly.
+    log.info("  [1/2] ipatool: obtaining license for %s", ident)
     pr = run_cmd([CONFIG.ipatool.cmd, "purchase", *idflags, "--non-interactive"], timeout=120)
-    low = (pr.stdout + " " + pr.stderr).lower()
-    if not pr.ok and not any(m in low for m in ("already", "owned", "licen")):
-        log.info("ipatool purchase note (%s): %s", app_id, (pr.stderr or pr.stdout)[:160])
+    if not pr.ok:
+        log.info("        purchase best-effort: %s (continuing; download will license)",
+                 _short_reason(pr.stderr or pr.stdout))
+    else:
+        log.info("        license obtained")
 
     # 2. Download the (now-licensed) encrypted IPA.
+    log.info("  [2/2] ipatool: downloading encrypted IPA ...")
     p = run_cmd([CONFIG.ipatool.cmd, "download", *idflags, "-o", str(enc),
                  "--purchase", "--non-interactive"], timeout=900)
     if enc.exists() and enc.stat().st_size > 0:
+        log.info("        downloaded %.1f MB", _mb(enc))
         return True, str(enc), ""
     return False, "", (p.stderr or p.stdout or "ipatool download failed")[:300]
 
@@ -105,23 +157,27 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False,
     if out.exists() and out.stat().st_size > 0:
         return WorkState.POSITIVE, str(out), ""
 
-    country = row["country"]
+    country = _field(row, "country") or "us"
+    ident = _identifier(row)
     if CONFIG.acquire_mode == "ipatool":
         ok, enc_path, err = download_with_ipatool(app_id, row)
         if not ok:
             low = err.lower()
             if any(m in low for m in _PERMANENT):
+                log.warning("  ✗ %s unavailable: %s", ident, _short_reason(err))
                 return WorkState.DONE_NEGATIVE, "", "unavailable: " + err
+            log.warning("  ✗ %s download failed: %s (will retry)", ident, _short_reason(err))
             return WorkState.UNTESTED, "", err
         # Decrypt the local encrypted IPA on the jailbroken device.
         cmd = [CONFIG.decrypt_device.ipadecrypt_cmd, "decrypt", enc_path,
-               "-o", str(out), "--redact"]
+               "-o", str(out), "--redact", "-v"]
     else:
-        cmd = [CONFIG.decrypt_device.ipadecrypt_cmd, "decrypt", _identifier(row),
-               "-o", str(out), "--storefront", country.upper(), "--redact"]
+        cmd = [CONFIG.decrypt_device.ipadecrypt_cmd, "decrypt", ident,
+               "-o", str(out), "--storefront", country.upper(), "--redact", "-v"]
         if from_appstore:
             cmd.append("--from-appstore")
 
+    log.info("  decrypting on device (ipadecrypt) ...")
     proc = run_cmd(cmd, timeout=timeout)
 
     # Clean up the encrypted staging file if we made one.
@@ -133,6 +189,8 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False,
             pass
 
     if out.exists() and out.stat().st_size > 0:
+        log.info("  ✓ decrypted: %s (%.1f MB) -> %s",
+                 _ipadecrypt_summary(proc.stdout), _mb(out), out)
         return WorkState.POSITIVE, str(out), ""
 
     text = (proc.stdout + " " + proc.stderr).lower()
@@ -160,14 +218,16 @@ def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None =
         return WorkState.UNTESTED, "", "ipatool not authenticated"
     key = bundle_id or str(app_id)          # DB primary key / output filename
     row = {"app_id": key, "bundle_id": bundle_id, "country": country, "store_id": app_id}
+    label = bundle_id or f"id{app_id}"
+    log.info("== acquire %s (%s) ==", label, country.upper())
     state, path, err = decrypt_one(key, row, from_appstore)
     db.upsert_app(key, country, bundle_id=bundle_id)
     db.save_acquisition(key, state, ipa_path=path, error=err)
     if state == WorkState.POSITIVE:
         db.set_stage(key, Stage.ACQUIRED)
-        log.info("acquired %s -> %s", key, path)
+        log.info("== DONE %s: decrypted -> %s ==", label, path)
     else:
-        log.warning("acquire %s: %s (%s)", key, err, state.name)
+        log.warning("== %s %s: %s ==", state.name, label, _short_reason(err))
     return state, path, err
 
 
@@ -185,22 +245,27 @@ def run(db: Database, limit: int | None = None, from_appstore: bool = False) -> 
     if limit:
         rows = rows[:limit]
 
+    total = len(rows)
+    log.info("acquire: %d app(s) queued (mode=%s)", total, CONFIG.acquire_mode)
     stats = {"attempted": 0, "ok": 0, "skipped": 0, "retry": 0}
-    for row in rows:
+    for i, row in enumerate(rows, 1):
         app_id = row["app_id"]
         ident = _identifier(row)
         stats["attempted"] += 1
+        log.info("[%d/%d] == acquire %s ==", i, total, ident)
         state, path, err = decrypt_one(app_id, row, from_appstore)
         db.save_acquisition(app_id, state, ipa_path=path, error=err)
         if state == WorkState.POSITIVE:
             db.set_stage(app_id, Stage.ACQUIRED)
             stats["ok"] += 1
-            log.info("decrypted %s (%s)", ident, app_id)
+            log.info("[%d/%d] ✓ %s decrypted (%.1f MB)", i, total, ident, _mb(path))
         elif state == WorkState.DONE_NEGATIVE:
             stats["skipped"] += 1
-            log.info("skip %s: %s", ident, err)
+            log.info("[%d/%d] – skip %s: %s", i, total, ident, _short_reason(err))
         else:
             stats["retry"] += 1
-            log.warning("retry-later %s: %s", ident, err)
-    log.info("acquire: %s", stats)
+            log.warning("[%d/%d] ↺ retry-later %s: %s", i, total, ident, _short_reason(err))
+        log.info("      progress: %d ok / %d skip / %d retry (of %d)",
+                 stats["ok"], stats["skipped"], stats["retry"], total)
+    log.info("acquire complete: %s", stats)
     return stats

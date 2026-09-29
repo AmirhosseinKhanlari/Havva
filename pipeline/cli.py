@@ -38,8 +38,13 @@ def cmd_acquire(args: argparse.Namespace) -> int:
     if args.bundle or args.app_id:
         state, path, err = acquire.acquire_one(db, bundle_id=args.bundle, app_id=args.app_id,
                                                country=args.country, from_appstore=args.from_appstore)
-        print(f"state={state.name} path={path or '-'} error={err or '-'}")
-        return 0 if state.name == "POSITIVE" else 1
+        if state.name == "POSITIVE":
+            import os
+            mb = os.path.getsize(path) / (1024 * 1024) if path and os.path.exists(path) else 0
+            print(f"\n✓ SUCCESS  decrypted -> {path}  ({mb:.1f} MB)")
+            return 0
+        print(f"\n✗ {state.name}  {args.bundle or args.app_id}: {err or '-'}")
+        return 1
     stats = acquire.run(db, limit=args.limit, from_appstore=args.from_appstore)
     print(stats)
     return 0
