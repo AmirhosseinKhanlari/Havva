@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Jobs{% endblock %}
+{% block content %}
+<h1 class="text-lg font-semibold mb-3">Jobs</h1>
+<div hx-get="/jobs/list" hx-trigger="every 2s" hx-swap="innerHTML">
+  {% include "_job_row.html" %}
+</div>
+{% endblock %}

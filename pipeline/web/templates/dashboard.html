@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1 class="text-lg font-semibold mb-3">Dashboard</h1>
+
+<section class="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
+  {% for label, key in [('Apps','apps'),('Acquired','acquired'),('Static','static_done'),('Pinned','pinned'),('Attest','appattest'),('Tested','attested_tested')] %}
+  <div class="rounded bg-slate-900 p-3">
+    <div class="text-2xl font-bold">{{ counts.get(key, 0) }}</div>
+    <div class="text-slate-400 text-xs">{{ label }}</div>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="mb-4">
+  <h2 class="text-sm text-slate-400 mb-1">Health</h2>
+  <div class="flex flex-wrap gap-2 text-xs">
+    {% for label, key in [('iPhone 8','iphone8'),('iPhone XR','xr'),('iTunes server','itunes_server'),('ipadecrypt','ipadecrypt_bootstrapped')] %}
+    <span class="px-2 py-1 rounded {% if health[key] %}bg-emerald-700{% else %}bg-red-800{% endif %}">
+      {{ label }}: {{ 'up' if health[key] else 'down' }}</span>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="mb-4">
+  <h2 class="text-sm text-slate-400 mb-1">Run</h2>
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-2" hx-target="#recent-jobs" hx-swap="innerHTML">
+    {% for k in ['crawl','acquire','static','iap','dynamic','attest','aggregate','full'] %}
+    <button class="rounded bg-indigo-700 px-2 py-2 text-sm"
+            hx-post="/run/{{ k }}"
+            hx-confirm="Run {{ k }} on the corpus?">{{ k }}</button>
+    {% endfor %}
+  </div>
+</section>
+
+<section>
+  <h2 class="text-sm text-slate-400 mb-1">Recent jobs</h2>
+  <div id="recent-jobs" hx-get="/jobs/list" hx-trigger="every 3s" hx-swap="innerHTML">
+    {% include "_job_row.html" %}
+  </div>
+</section>
+{% endblock %}

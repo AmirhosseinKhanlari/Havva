@@ -97,3 +97,18 @@ server (cloned in `tools/vphone-mcp`, gitignored), which lets an agent drive the
 vphone iOS VM (tap, type, screenshot, read screen) over the VM's control socket.
 Activate: restart Claude Code and approve the project MCP; it only works while a
 vphone VM is running. Re-clone with `git clone https://github.com/pluginslab/vphone-mcp tools/vphone-mcp && (cd tools/vphone-mcp && uv sync)`.
+
+## Satella Console (web UI)
+
+A mobile-friendly web UI over the whole pipeline: run any stage or the full
+funnel, watch live progress, browse results. The CLI keeps working exactly as
+before; the console just calls the same pipeline functions.
+
+```bash
+# set a token first (in .env): WEB_AUTH_TOKEN=<long random string>
+python3 -m pipeline.cli web          # or: python3 -m pipeline.web
+# open http://<mac-ip>:8770 from your phone on the same network, then sign in
+```
+
+Config (in .env): WEB_AUTH_TOKEN, WEB_HOST (default 0.0.0.0), WEB_PORT
+(default 8770), WEB_MAX_WORKERS (default 3).

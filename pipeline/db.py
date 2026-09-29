@@ -134,9 +134,37 @@ CREATE TABLE IF NOT EXISTS attestation (
     tested_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                  -- crawl|acquire|deep_analyze|static|dynamic|attest|iap|aggregate|full
+    target TEXT,                         -- app_id or 'batch'
+    params TEXT,                         -- JSON
+    state TEXT NOT NULL DEFAULT 'queued',-- queued|running|done|failed|cancelled
+    progress_pct INTEGER DEFAULT 0,
+    log TEXT DEFAULT '',
+    error TEXT,
+    created_at TEXT,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS analysis (
+    app_id TEXT PRIMARY KEY REFERENCES apps(app_id),
+    info_plist TEXT,                     -- JSON
+    entitlements TEXT,                   -- JSON
+    ats TEXT,                            -- JSON
+    frameworks TEXT,                     -- JSON
+    sdks TEXT,                           -- JSON
+    secrets TEXT,                        -- JSON
+    file_tree TEXT,                      -- JSON
+    crypto_hints TEXT,                   -- JSON
+    analyzed_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_apps_stage ON apps(stage);
 CREATE INDEX IF NOT EXISTS idx_static_pins ON static_profile(pins_flag);
 CREATE INDEX IF NOT EXISTS idx_dynamic_app ON dynamic_runs(app_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 """
 
 
@@ -200,6 +228,60 @@ class Database:
                     f"INSERT INTO apps ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                     (app_id, *fields.values()),
                 )
+
+    # ---- Jobs (web UI) --------------------------------------------------
+
+    _JOB_TERMINAL = ("done", "failed", "cancelled")
+
+    def create_job(self, kind: str, target: str, params: dict | None = None) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO jobs (kind, target, params, state, created_at) "
+                "VALUES (?, ?, ?, 'queued', ?)",
+                (kind, target, json.dumps(params or {}), _now()),
+            )
+            return int(cur.lastrowid)
+
+    def get_job(self, job_id: int):
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+
+    def list_jobs(self, limit: int = 50):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+
+    def set_job_state(self, job_id: int, state: str, error: str | None = None) -> None:
+        with self.connect() as conn:
+            sets = ["state=?"]
+            vals: list = [state]
+            if state == "running":
+                sets.append("started_at=?"); vals.append(_now())
+            if state in self._JOB_TERMINAL:
+                sets.append("finished_at=?"); vals.append(_now())
+            if error is not None:
+                sets.append("error=?"); vals.append(error)
+            vals.append(job_id)
+            conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id=?", vals)
+
+    def append_job_log(self, job_id: int, text: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE jobs SET log = COALESCE(log,'') || ? WHERE id=?",
+                         (text, job_id))
+
+    def set_job_progress(self, job_id: int, pct: int) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE jobs SET progress_pct=? WHERE id=?", (int(pct), job_id))
+
+    def mark_interrupted_jobs(self) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET state='failed', error='interrupted', finished_at=? "
+                "WHERE state IN ('queued','running')", (_now(),))
+            return cur.rowcount
+
+    # ---- Stage transitions ----------------------------------------------
 
     def set_stage(self, app_id: str, stage: Stage) -> None:
         with self.connect() as conn:

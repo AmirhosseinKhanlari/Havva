@@ -133,6 +133,12 @@ def cmd_export(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(_args: argparse.Namespace) -> int:
+    from .web.__main__ import main as web_main
+    web_main()
+    return 0
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     db = Database(CONFIG.paths.db)
     counts = db.counts()
@@ -187,6 +193,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="DB counts and config readiness").set_defaults(func=cmd_status)
     sub.add_parser("doctor", help="check tools and assets").set_defaults(func=cmd_doctor)
+    sub.add_parser("web", help="launch the Satella Console web UI").set_defaults(func=cmd_web)
 
     p_crawl = sub.add_parser("crawl", help="crawl AppFigures + enrich with iTunes metadata")
     p_crawl.add_argument("--countries", help="comma list, overrides STOREFRONTS")

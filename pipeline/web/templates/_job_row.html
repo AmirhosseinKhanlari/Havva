@@ -1,0 +1,30 @@
+<table class="w-full text-sm" id="jobs-table">
+  <thead class="text-slate-400"><tr>
+    <th class="text-left p-1">#</th><th class="text-left p-1">Kind</th>
+    <th class="text-left p-1">Target</th><th class="text-left p-1">State</th>
+    <th class="text-left p-1">%</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for j in jobs %}
+    <tr class="border-t border-slate-800">
+      <td class="p-1">{{ j['id'] }}</td>
+      <td class="p-1">{{ j['kind'] }}</td>
+      <td class="p-1 font-mono text-xs">{{ j['target'] }}</td>
+      <td class="p-1">
+        <span class="px-2 py-0.5 rounded text-xs
+          {% if j['state']=='running' %}bg-amber-600{% elif j['state']=='done' %}bg-emerald-700
+          {% elif j['state']=='failed' %}bg-red-700{% elif j['state']=='cancelled' %}bg-slate-600
+          {% else %}bg-slate-700{% endif %}">{{ j['state'] }}</span>
+      </td>
+      <td class="p-1">{{ j['progress_pct'] }}</td>
+      <td class="p-1 whitespace-nowrap">
+        <a class="text-indigo-400" href="/jobs/{{ j['id'] }}/stream" target="_blank">log</a>
+        {% if j['state'] in ('queued','running') %}
+        <button class="text-red-400 ml-2" hx-post="/jobs/{{ j['id'] }}/cancel"
+                hx-target="#jobs-table" hx-swap="outerHTML">cancel</button>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
