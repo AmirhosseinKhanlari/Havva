@@ -271,6 +271,21 @@ def analyze_ipa(ipa_path: str | Path) -> tuple[DefenseProfile | None, str]:
     return classify(corpus), corpus.arch
 
 
+def classify_one(db: Database, app_id: str):
+    """Classify one acquired app's defenses (pinning, TLS stack, App Attest, anti-
+    tamper). Returns the saved DefenseProfile. Raises if not acquired."""
+    ac = db.get_acquisition(app_id)
+    ipa_path = ac["ipa_path"] if ac else ""
+    if not ipa_path or not Path(ipa_path).exists():
+        raise RuntimeError("app not acquired (no decrypted IPA)")
+    prof, _arch = analyze_ipa(ipa_path)
+    if prof is None:
+        raise RuntimeError("could not extract IPA for classification")
+    db.save_static_profile(app_id, prof)
+    db.set_stage(app_id, Stage.STATIC_DONE)
+    return prof
+
+
 def run(db: Database, limit: int | None = None) -> dict[str, int]:
     rows = db.apps_needing(Stage.STATIC_DONE)
     if limit:

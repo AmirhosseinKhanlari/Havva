@@ -1,18 +1,43 @@
-{% if not profile and not analysis %}
-<p class="text-slate-400 text-sm">No static classification or deep analysis yet.</p>
-{% endif %}
+<!-- SSL Pinning & client defenses (from the static classifier) -->
+<section class="mb-5">
+  <div class="flex items-center justify-between mb-2">
+    <h3 class="text-sm font-semibold">SSL pinning &amp; client defenses</h3>
+    <button class="rounded bg-indigo-700 px-3 py-1 text-xs" hx-post="/app/{{ app_id }}/classify"
+            hx-target="#cls-action" hx-swap="innerHTML">Run classifier</button>
+  </div>
+  <span id="cls-action" class="text-xs"></span>
 
-{% if profile %}
-<h3 class="text-sm font-semibold mb-1">Classifier verdict</h3>
-<div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm mb-4">
-  {% for label, key in [('Pinned','pins_flag'),('Pin layer','pin_layer'),('Pin library','pin_library'),('TLS stack','tls_stack'),('App Attest','appattest_flag'),('DeviceCheck','devicecheck_flag'),('Anti-tamper','anti_tamper_hints'),('Anti-debug','anti_debug_hints'),('JB detect','jailbreak_detection_hints')] %}
-  <div class="rounded bg-slate-900 p-2"><div class="text-slate-500 text-xs">{{ label }}</div><div>{{ profile[key] }}</div></div>
-  {% endfor %}
-</div>
-{% endif %}
+  {% if profile %}
+  <div class="rounded p-3 mb-2 {% if profile['pins_flag'] %}bg-amber-900/40 border border-amber-700{% else %}bg-slate-900 border border-slate-800{% endif %}">
+    <div class="text-lg font-semibold">
+      {% if profile['pins_flag'] %}Certificate pinning: DETECTED{% else %}No certificate pinning detected{% endif %}
+    </div>
+    {% if profile['pins_flag'] %}
+    <div class="text-sm text-slate-300 mt-1">
+      Layer: <b>{{ profile['pin_layer'] }}</b>
+      {% if profile['pin_library'] %}· Library: <b>{{ profile['pin_library'] }}</b>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm">
+    {% for label, key in [('TLS stack','tls_stack'),('App Attest','appattest_flag'),('DeviceCheck','devicecheck_flag'),('Anti-tamper','anti_tamper_hints'),('Anti-debug','anti_debug_hints'),('JB detect','jailbreak_detection_hints'),('NetworkExt','networkextension_flag')] %}
+    <div class="rounded bg-slate-900 p-2"><div class="text-slate-500 text-xs">{{ label }}</div><div>{{ profile[key] }}</div></div>
+    {% endfor %}
+  </div>
+  {% if profile['matched_patterns'] and profile['matched_patterns'] != '{}' %}
+  <details class="mt-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-xs text-slate-400">matched evidence</summary>
+    <pre class="text-xs mt-1 whitespace-pre-wrap">{{ profile['matched_patterns'] }}</pre>
+  </details>
+  {% endif %}
+  {% else %}
+  <p class="text-slate-400 text-sm">Not classified yet. Run the classifier to detect pinning, TLS stack, App Attest and anti-tamper defenses. (Requires the app to be acquired first.)</p>
+  {% endif %}
+</section>
 
+<!-- Deep MobSF-style analysis -->
 <div class="flex items-center gap-2 mb-3">
-  <button class="rounded bg-indigo-700 px-3 py-1 text-sm" hx-post="/app/{{ app_id }}/analyze"
+  <h3 class="text-sm font-semibold">Deep analysis</h3>
+  <button class="rounded bg-indigo-700 px-3 py-1 text-xs" hx-post="/app/{{ app_id }}/analyze"
           hx-target="#an-action" hx-swap="innerHTML">Run deep analysis</button>
   <span id="an-action" class="text-xs"></span>
   {% if analysis %}<span class="text-xs text-slate-500">analyzed {{ analysis['analyzed_at'] }}</span>{% endif %}

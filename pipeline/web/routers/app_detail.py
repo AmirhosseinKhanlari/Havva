@@ -127,6 +127,22 @@ def act_download(app_id: str, _: None = Depends(require_auth)):
                         media_type="application/octet-stream")
 
 
+@router.post("/app/{app_id}/classify")
+def act_classify(app_id: str, request: Request, _: None = Depends(require_auth)):
+    _app_or_404(app_id)
+
+    def job(ctx):
+        from ... import static_classify
+        with tee_pipeline_logs(ctx):
+            prof = static_classify.classify_one(get_db(), app_id)
+            ctx.log(f"pinned={prof.pins_flag} layer={prof.pin_layer} "
+                    f"library={prof.pin_library} attest={prof.appattest_flag}\n")
+
+    get_jobs_manager().submit("static", app_id, job, device_bound=False)
+    return templates.TemplateResponse(request, "_action_queued.html",
+                                      {"request": request, "app_id": app_id, "what": "classify"})
+
+
 @router.post("/app/{app_id}/analyze")
 def act_analyze(app_id: str, request: Request, _: None = Depends(require_auth)):
     _app_or_404(app_id)
