@@ -515,6 +515,7 @@ class Database:
                 f"SELECT COUNT(*) FROM apps a {joins} {wsql}", params).fetchone()[0]
             rows = conn.execute(
                 f"SELECT a.app_id, a.name, a.bundle_id, a.primary_category, a.artwork_url, "
+                f"a.file_size_bytes, a.minimum_os, a.country, "
                 f"COALESCE(ac.decrypt_status,0) AS acquired, "
                 f"COALESCE(s.pins_flag,0) AS pinned, "
                 f"COALESCE(s.appattest_flag,0) AS attest "
