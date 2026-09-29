@@ -80,10 +80,16 @@ h1.title{margin:0;font-size:34px;font-weight:700;letter-spacing:-.03em;line-heig
 .pill.danger{color:var(--bad);background:rgba(255,69,58,.12);border:none}
 
 /* fields */
-.field{width:100%;padding:10px 13px;font-size:14px;border-radius:12px;background:var(--field);border:1px solid var(--field-brd);outline:none;color:var(--ink);font-family:inherit}
-.searchbar{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:16px;background:var(--field);border:1px solid var(--field-brd);backdrop-filter:blur(20px)}
+.field{width:100%;padding:11px 14px;font-size:14px;border-radius:12px;background:var(--field);border:1px solid var(--field-brd);outline:none;color:var(--ink);font-family:inherit;transition:border-color .15s ease,box-shadow .15s ease;box-shadow:0 1px 0 var(--glass-hi) inset}
+.field::placeholder{color:var(--ink3)}
+.field:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,132,255,.18)}
+.searchbar{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:16px;background:var(--field);border:1px solid var(--field-brd);backdrop-filter:blur(20px);box-shadow:0 1px 0 var(--glass-hi) inset}
 .searchbar input{flex:1;background:none;border:none;outline:none;font-size:15px;color:var(--ink);font-family:inherit}
-select.field{appearance:none}
+/* iOS-style select: custom chevron, no native arrow */
+select.field{appearance:none;-webkit-appearance:none;-moz-appearance:none;padding-right:34px;cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8f98' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat:no-repeat;background-position:right 13px center;background-size:11px}
+select.field::-ms-expand{display:none}
 
 /* chips / badges */
 .chips{display:flex;gap:8px;flex-wrap:wrap}
