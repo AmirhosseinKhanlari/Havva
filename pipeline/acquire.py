@@ -26,9 +26,17 @@ _PERMANENT = ("not found", "no such app", "404", "not available",
 _TOO_LARGE = ("too large", "exceeds")
 
 
+def _field(row, key):
+    """Read a field from a sqlite3.Row or a dict, returning None if absent."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def _identifier(row) -> str:
     """Prefer bundle id (stable across storefronts); fall back to track id."""
-    return row["bundle_id"] or row["app_id"]
+    return _field(row, "bundle_id") or _field(row, "app_id")
 
 
 def _ipatool_login() -> bool:
@@ -49,14 +57,24 @@ def _ipatool_login() -> bool:
 
 
 def download_with_ipatool(app_id: str, row) -> tuple[bool, str, str]:
-    """Download the still-encrypted IPA with ipatool. Returns (ok, path, error)."""
-    bundle = row["bundle_id"]
-    if not bundle:
-        return False, "", "ipatool needs a bundle id"
+    """Download the still-encrypted IPA with ipatool by bundle id or numeric app
+    id. Returns (ok, path, error)."""
+    bundle = _field(row, "bundle_id")
+    store_id = _field(row, "store_id")
+    if not store_id:
+        # fall back to app_id if it is a numeric App Store id
+        cand = str(_field(row, "app_id") or "")
+        store_id = cand if cand.isdigit() else None
     enc = CONFIG.paths.work_dir / f"{app_id}.enc.ipa"
     enc.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [CONFIG.ipatool.cmd, "download", "-b", bundle, "-o", str(enc),
-           "--purchase", "--non-interactive"]
+    if bundle:
+        cmd = [CONFIG.ipatool.cmd, "download", "-b", bundle, "-o", str(enc),
+               "--purchase", "--non-interactive"]
+    elif store_id:
+        cmd = [CONFIG.ipatool.cmd, "download", "-i", str(store_id), "-o", str(enc),
+               "--purchase", "--non-interactive"]
+    else:
+        return False, "", "ipatool needs a bundle id or numeric app id"
     p = run_cmd(cmd, timeout=900)
     if enc.exists() and enc.stat().st_size > 0:
         return True, str(enc), ""
@@ -120,24 +138,27 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False,
     return WorkState.UNTESTED, "", (proc.stderr or proc.stdout or "unknown error")[:300]
 
 
-def acquire_one(db: Database, bundle_id: str, country: str = "us",
-                app_id: str | None = None, from_appstore: bool = False) -> tuple[WorkState, str, str]:
-    """Download + install + decrypt ONE specific app by bundle id. Returns
-    (work_state, ipa_path, error). Records it in the DB like the corpus path."""
+def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None = None,
+                country: str = "us", from_appstore: bool = False) -> tuple[WorkState, str, str]:
+    """Download + install + decrypt ONE specific app by bundle id and/or numeric
+    App Store id. At least one identifier is required. Returns
+    (work_state, ipa_path, error) and records it in the DB like the corpus path."""
+    if not bundle_id and not app_id:
+        return WorkState.DONE_NEGATIVE, "", "need a bundle id or app id"
     if not CONFIG.decrypt_device.is_bootstrapped:
         return WorkState.UNTESTED, "", "ipadecrypt not bootstrapped"
     if CONFIG.acquire_mode == "ipatool" and not _ipatool_login():
         return WorkState.UNTESTED, "", "ipatool not authenticated"
-    app_id = app_id or bundle_id
-    row = {"app_id": app_id, "bundle_id": bundle_id, "country": country}
-    state, path, err = decrypt_one(app_id, row, from_appstore)
-    db.upsert_app(app_id, country, bundle_id=bundle_id)
-    db.save_acquisition(app_id, state, ipa_path=path, error=err)
+    key = bundle_id or str(app_id)          # DB primary key / output filename
+    row = {"app_id": key, "bundle_id": bundle_id, "country": country, "store_id": app_id}
+    state, path, err = decrypt_one(key, row, from_appstore)
+    db.upsert_app(key, country, bundle_id=bundle_id)
+    db.save_acquisition(key, state, ipa_path=path, error=err)
     if state == WorkState.POSITIVE:
-        db.set_stage(app_id, Stage.ACQUIRED)
-        log.info("acquired %s -> %s", bundle_id, path)
+        db.set_stage(key, Stage.ACQUIRED)
+        log.info("acquired %s -> %s", key, path)
     else:
-        log.warning("acquire %s: %s (%s)", bundle_id, err, state.name)
+        log.warning("acquire %s: %s (%s)", key, err, state.name)
     return state, path, err
 
 

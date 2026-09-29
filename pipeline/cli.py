@@ -35,9 +35,9 @@ def cmd_crawl(args: argparse.Namespace) -> int:
 def cmd_acquire(args: argparse.Namespace) -> int:
     from . import acquire
     db = Database(CONFIG.paths.db)
-    if args.bundle:
-        state, path, err = acquire.acquire_one(db, args.bundle, country=args.country,
-                                               app_id=args.app_id, from_appstore=args.from_appstore)
+    if args.bundle or args.app_id:
+        state, path, err = acquire.acquire_one(db, bundle_id=args.bundle, app_id=args.app_id,
+                                               country=args.country, from_appstore=args.from_appstore)
         print(f"state={state.name} path={path or '-'} error={err or '-'}")
         return 0 if state.name == "POSITIVE" else 1
     stats = acquire.run(db, limit=args.limit, from_appstore=args.from_appstore)
