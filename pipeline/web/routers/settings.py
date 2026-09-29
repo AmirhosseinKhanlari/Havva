@@ -65,6 +65,7 @@ def settings_page(request: Request, _: None = Depends(require_auth)):
         "editable": EDITABLE,
         "current": _current(),
         "secrets": {k: _mask(os.environ.get(k, "")) for k in SECRETS},
+        "nav": "settings",
     })
 
 

@@ -1,8 +1,4 @@
-<div class="flex flex-wrap gap-2 text-xs">
-  {% for t, ok in tools.items() %}
-  <span class="px-2 py-1 rounded {% if ok %}bg-emerald-700{% else %}bg-red-800{% endif %}">{{ t }}</span>
-  {% endfor %}
-  {% for a, ok in assets.items() %}
-  <span class="px-2 py-1 rounded {% if ok %}bg-emerald-700{% else %}bg-red-800{% endif %}">{{ a }}</span>
-  {% endfor %}
+<div class="chips">
+  {% for t, ok in tools.items() %}<span class="badge mono" style="{% if ok %}color:var(--ok){% else %}color:var(--bad){% endif %}">{{ t }}</span>{% endfor %}
+  {% for a, ok in assets.items() %}<span class="badge mono" style="{% if ok %}color:var(--ok){% else %}color:var(--bad){% endif %}">{{ a }}</span>{% endfor %}
 </div>

@@ -1,34 +1,25 @@
 {% extends "base.html" %}
 {% block title %}Corpus{% endblock %}
+{% block h1 %}Corpus{% endblock %}
 {% block content %}
-<h1 class="text-lg font-semibold mb-3">Corpus</h1>
-
-<form hx-get="/corpus" hx-target="#corpus-results" hx-swap="outerHTML"
-      hx-trigger="submit, change from:select"
-      class="grid grid-cols-2 sm:grid-cols-6 gap-2 mb-4 text-sm">
-  <input name="q" value="{{ q }}" placeholder="name / bundle / id"
-         class="col-span-2 sm:col-span-2 rounded bg-slate-800 px-2 py-1">
-  <select name="category" class="rounded bg-slate-800 px-2 py-1">
-    <option value="">any cat</option>
-    {% for c in categories %}<option value="{{ c }}" {% if c==category %}selected{% endif %}>{{ c }}</option>{% endfor %}
-  </select>
-  <select name="acquired" class="rounded bg-slate-800 px-2 py-1">
-    <option value="">acq: any</option>
-    <option value="1" {% if acquired=='1' %}selected{% endif %}>acquired</option>
-    <option value="0" {% if acquired=='0' %}selected{% endif %}>not</option>
-  </select>
-  <select name="pinned" class="rounded bg-slate-800 px-2 py-1">
-    <option value="">pin: any</option>
-    <option value="1" {% if pinned=='1' %}selected{% endif %}>pinned</option>
-    <option value="0" {% if pinned=='0' %}selected{% endif %}>not</option>
-  </select>
-  <select name="attest" class="rounded bg-slate-800 px-2 py-1">
-    <option value="">att: any</option>
-    <option value="1" {% if attest=='1' %}selected{% endif %}>attest</option>
-    <option value="0" {% if attest=='0' %}selected{% endif %}>not</option>
-  </select>
-  <button class="rounded bg-indigo-700 px-2 py-1 col-span-2 sm:col-span-1">Search</button>
-</form>
-
-{% include "_corpus_table.html" %}
+<div class="section">
+  <form hx-get="/corpus" hx-target="#corpus-results" hx-swap="outerHTML"
+        hx-trigger="submit, change from:select, keyup changed delay:400ms from:input[name='q']">
+    <div class="searchbar" style="margin-bottom:14px">
+      <div style="width:16px;height:16px;border-radius:50%;border:2px solid var(--ink3)"></div>
+      <input name="q" value="{{ q }}" placeholder="Search name, bundle id, or app id">
+      <span class="muted" style="font-size:12.5px;white-space:nowrap">{{ total }} apps</span>
+    </div>
+    <div class="chips" style="margin-bottom:18px">
+      <select name="category" class="chip" style="appearance:none">
+        <option value="">All categories</option>
+        {% for c in categories %}<option value="{{ c }}" {% if c==category %}selected{% endif %}>{{ c }}</option>{% endfor %}
+      </select>
+      <select name="acquired" class="chip"><option value="">Acquired: any</option><option value="1" {% if acquired=='1' %}selected{% endif %}>Acquired</option><option value="0" {% if acquired=='0' %}selected{% endif %}>Not acquired</option></select>
+      <select name="pinned" class="chip"><option value="">Pinning: any</option><option value="1" {% if pinned=='1' %}selected{% endif %}>Pinned</option><option value="0" {% if pinned=='0' %}selected{% endif %}>Not pinned</option></select>
+      <select name="attest" class="chip"><option value="">Attest: any</option><option value="1" {% if attest=='1' %}selected{% endif %}>Adopts</option><option value="0" {% if attest=='0' %}selected{% endif %}>None</option></select>
+    </div>
+  </form>
+  {% include "_corpus_table.html" %}
+</div>
 {% endblock %}

@@ -1,18 +1,13 @@
-{% if error %}<p class="text-red-400 text-xs">{{ error }}</p>{% endif %}
+{% if error %}<p style="color:var(--bad);font-size:12px">{{ error }}</p>{% endif %}
 {% if versions %}
-<table class="w-full text-xs mt-2">
-  <tbody>
+<div class="glass sm" style="padding:8px 4px;margin-top:8px">
   {% for v in versions %}
-  <tr class="border-t border-slate-800">
-    <td class="p-1">{{ v['shortVersion'] }}</td>
-    <td class="p-1 font-mono text-slate-500">{{ v['verId'] }}</td>
-    <td class="p-1 text-right">
-      <button class="text-indigo-400" hx-post="/app/{{ app_id }}/acquire"
-              hx-vals='{"version": "{{ v['verId'] }}"}'
-              hx-target="#acq-action" hx-swap="innerHTML">get</button>
-    </td>
-  </tr>
+  <div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-top:1px solid var(--hair)">
+    <span style="font-size:13px;font-weight:600">{{ v['shortVersion'] }}</span>
+    <span class="mono muted" style="font-size:12px">{{ v['verId'] }}</span>
+    <button class="pill small" style="margin-left:auto" hx-post="/app/{{ app_id }}/acquire"
+            hx-vals='{"version": "{{ v['verId'] }}"}' hx-target="#acq-action" hx-swap="innerHTML">get</button>
+  </div>
   {% endfor %}
-  </tbody>
-</table>
+</div>
 {% endif %}

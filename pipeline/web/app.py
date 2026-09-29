@@ -37,6 +37,9 @@ def get_jobs_manager():
 def create_app() -> FastAPI:
     app = FastAPI(title="Satella Console", docs_url=None, redoc_url=None)
 
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
+
     @app.get("/healthz")
     def healthz() -> JSONResponse:
         return JSONResponse({"ok": True})

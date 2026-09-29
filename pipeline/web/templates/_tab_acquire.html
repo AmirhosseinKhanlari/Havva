@@ -1,20 +1,22 @@
-<div class="space-y-3 text-sm">
+<div class="hlist">
   {% if acq and acq['decrypt_status']==1 %}
-    <div class="rounded bg-emerald-900/40 border border-emerald-700 p-3">
-      Decrypted: <span class="font-mono">{{ acq['ipa_path'] }}</span><br>
-      <a class="text-indigo-300 underline" href="/app/{{ app_id }}/download">Download decrypted IPA</a>
+    <div class="banner"><div class="row1"><span class="bdot" style="background:var(--ok)"></span>
+      <span class="btitle">Decrypted</span></div>
+      <div class="ink2 mono" style="margin-top:8px;padding-left:22px;font-size:13px">{{ acq['ipa_path'] }}</div>
+      <div style="margin-top:10px;padding-left:22px"><a class="pill small primary" href="/app/{{ app_id }}/download">Download IPA</a></div>
     </div>
   {% elif acq and acq['error'] %}
-    <div class="rounded bg-red-900/40 border border-red-700 p-3">Last attempt failed: {{ acq['error'][:200] }}</div>
+    <div class="banner hit"><div class="row1"><span class="bdot" style="background:var(--bad)"></span><span class="btitle">Last attempt failed</span></div>
+      <div class="ink2" style="margin-top:8px;padding-left:22px;font-size:13px">{{ acq['error'][:200] }}</div></div>
   {% else %}
-    <p class="text-slate-400">Not acquired yet.</p>
+    <p class="muted" style="font-size:14px">Not acquired yet.</p>
   {% endif %}
 
-  <form hx-post="/app/{{ app_id }}/acquire" hx-target="#acq-action" hx-swap="innerHTML" class="flex gap-2 items-center">
-    <input name="version" placeholder="version (optional, e.g. 1.0.5)" class="rounded bg-slate-800 px-2 py-1 flex-1">
-    <button class="rounded bg-indigo-700 px-3 py-1">Download + decrypt</button>
+  <form hx-post="/app/{{ app_id }}/acquire" hx-target="#acq-action" hx-swap="innerHTML" style="display:flex;gap:10px;align-items:center">
+    <input name="version" placeholder="version (optional, e.g. 1.0.5)" class="field" style="flex:1">
+    <button class="pill primary">Download + decrypt</button>
   </form>
-  <button class="text-indigo-400 text-xs" hx-get="/app/{{ app_id }}/versions" hx-target="#versions" hx-swap="innerHTML">List older versions</button>
+  <button class="pill small" hx-get="/app/{{ app_id }}/versions" hx-target="#versions" hx-swap="innerHTML" style="align-self:flex-start">List older versions</button>
   <div id="versions"></div>
   <div id="acq-action"></div>
 </div>

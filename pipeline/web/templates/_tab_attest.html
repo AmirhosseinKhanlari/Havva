@@ -1,16 +1,9 @@
-<div class="space-y-3 text-sm">
+<div class="hlist">
   {% if attestation %}
-  <div class="rounded bg-slate-900 p-3">
-    <div class="text-slate-500 text-xs">Enforcement</div>
-    <div class="text-lg">{{ attestation['backend_behavior'] or '-' }}</div>
-    <div class="text-xs text-slate-500 mt-1">tested: {{ attestation['tested_flag'] }} · neutralized: {{ attestation['neutralized_flag'] }}
-      {% if attestation['error'] %}· {{ attestation['error'][:120] }}{% endif %}</div>
-  </div>
-  {% else %}
-  <p class="text-slate-400">Not tested yet. Requires the XR + results/accounts.json (test accounts).</p>
-  {% endif %}
-  <button class="rounded bg-indigo-700 px-3 py-1" hx-post="/app/{{ app_id }}/attest"
-          hx-target="#att-action" hx-swap="innerHTML"
-          hx-confirm="Run the attestation enforcement probe?">Run enforcement probe</button>
+  <div class="glass sm" style="padding:15px 18px"><div class="muted" style="font-size:11.5px">Enforcement</div>
+    <div style="font-size:18px;font-weight:700">{{ attestation['backend_behavior'] or '-' }}</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">tested: {{ attestation['tested_flag'] }} · neutralized: {{ attestation['neutralized_flag'] }}{% if attestation['error'] %} · {{ attestation['error'][:120] }}{% endif %}</div></div>
+  {% else %}<p class="muted" style="font-size:14px">Not tested yet. Requires the XR + results/accounts.json (test accounts).</p>{% endif %}
+  <button class="pill primary" style="align-self:flex-start" hx-post="/app/{{ app_id }}/attest" hx-target="#att-action" hx-swap="innerHTML" hx-confirm="Run the attestation enforcement probe?">Run enforcement probe</button>
   <div id="att-action"></div>
 </div>

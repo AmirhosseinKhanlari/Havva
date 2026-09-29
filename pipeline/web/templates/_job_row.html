@@ -1,30 +1,22 @@
-<table class="w-full text-sm" id="jobs-table">
-  <thead class="text-slate-400"><tr>
-    <th class="text-left p-1">#</th><th class="text-left p-1">Kind</th>
-    <th class="text-left p-1">Target</th><th class="text-left p-1">State</th>
-    <th class="text-left p-1">%</th><th></th>
-  </tr></thead>
-  <tbody>
+<div id="jobs-table" class="hlist">
   {% for j in jobs %}
-    <tr class="border-t border-slate-800">
-      <td class="p-1">{{ j['id'] }}</td>
-      <td class="p-1">{{ j['kind'] }}</td>
-      <td class="p-1 font-mono text-xs">{{ j['target'] }}</td>
-      <td class="p-1">
-        <span class="px-2 py-0.5 rounded text-xs
-          {% if j['state']=='running' %}bg-amber-600{% elif j['state']=='done' %}bg-emerald-700
-          {% elif j['state']=='failed' %}bg-red-700{% elif j['state']=='cancelled' %}bg-slate-600
-          {% else %}bg-slate-700{% endif %}">{{ j['state'] }}</span>
-      </td>
-      <td class="p-1">{{ j['progress_pct'] }}</td>
-      <td class="p-1 whitespace-nowrap">
-        <a class="text-indigo-400" href="/jobs/{{ j['id'] }}/stream" target="_blank">log</a>
-        {% if j['state'] in ('queued','running') %}
-        <button class="text-red-400 ml-2" hx-post="/jobs/{{ j['id'] }}/cancel"
-                hx-target="#jobs-table" hx-swap="outerHTML">cancel</button>
-        {% endif %}
-      </td>
-    </tr>
+  <div class="glass sm" style="padding:15px 18px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:11px">
+      <span class="mono" style="font-size:12px;font-weight:700;color:var(--ink3)">#{{ j['id'] }}</span>
+      <span style="font-size:15px;font-weight:600;text-transform:capitalize">{{ j['kind'] }}</span>
+      <span class="mono" style="font-size:12px;color:var(--ink3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ j['target'] }}</span>
+      <span class="state {{ j['state'] }}" style="margin-left:auto">{{ j['state'] }}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px">
+      <div class="track" style="flex:1"><i style="width:{{ j['progress_pct'] }}%"></i></div>
+      <span style="font-size:13px;font-weight:600;width:42px;text-align:right;color:var(--ink2)">{{ j['progress_pct'] }}%</span>
+      <a href="/jobs/{{ j['id'] }}/stream" target="_blank" style="font-size:12.5px;font-weight:600">log</a>
+      {% if j['state'] in ('queued','running') %}
+      <button class="pill danger small" hx-post="/jobs/{{ j['id'] }}/cancel" hx-target="#jobs-table" hx-swap="outerHTML">cancel</button>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <p class="muted" style="font-size:13px">No jobs yet.</p>
   {% endfor %}
-  </tbody>
-</table>
+</div>

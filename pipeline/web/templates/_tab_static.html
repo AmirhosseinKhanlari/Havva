@@ -1,98 +1,57 @@
-<!-- SSL Pinning & client defenses (from the static classifier) -->
-<section class="mb-5">
-  <div class="flex items-center justify-between mb-2">
-    <h3 class="text-sm font-semibold">SSL pinning &amp; client defenses</h3>
-    <button class="rounded bg-indigo-700 px-3 py-1 text-xs" hx-post="/app/{{ app_id }}/classify"
-            hx-target="#cls-action" hx-swap="innerHTML">Run classifier</button>
-  </div>
-  <span id="cls-action" class="text-xs"></span>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px">
+  <h3 style="margin:0;font-size:15px;font-weight:700">SSL pinning &amp; client defenses</h3>
+  <button class="pill small primary" hx-post="/app/{{ app_id }}/classify" hx-target="#cls-action" hx-swap="innerHTML">Run classifier</button>
+</div>
+<span id="cls-action"></span>
 
-  {% if profile %}
-  <div class="rounded p-3 mb-2 {% if profile['pins_flag'] %}bg-amber-900/40 border border-amber-700{% else %}bg-slate-900 border border-slate-800{% endif %}">
-    <div class="text-lg font-semibold">
-      {% if profile['pins_flag'] %}Certificate pinning: DETECTED{% else %}No certificate pinning detected{% endif %}
-    </div>
-    {% if profile['pins_flag'] %}
-    <div class="text-sm text-slate-300 mt-1">
-      Layer: <b>{{ profile['pin_layer'] }}</b>
-      {% if profile['pin_library'] %}· Library: <b>{{ profile['pin_library'] }}</b>{% endif %}
-    </div>
-    {% endif %}
+{% if profile %}
+<div class="banner {% if profile['pins_flag'] %}hit{% endif %}" style="margin-bottom:14px">
+  <div class="row1">
+    <span class="bdot" style="background:{% if profile['pins_flag'] %}var(--warn){% else %}var(--ok){% endif %};box-shadow:0 0 14px {% if profile['pins_flag'] %}var(--warn){% else %}var(--ok){% endif %}"></span>
+    <span class="btitle">{% if profile['pins_flag'] %}Certificate pinning: DETECTED{% else %}No certificate pinning detected{% endif %}</span>
   </div>
-  <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm">
-    {% for label, key in [('TLS stack','tls_stack'),('App Attest','appattest_flag'),('DeviceCheck','devicecheck_flag'),('Anti-tamper','anti_tamper_hints'),('Anti-debug','anti_debug_hints'),('JB detect','jailbreak_detection_hints'),('NetworkExt','networkextension_flag')] %}
-    <div class="rounded bg-slate-900 p-2"><div class="text-slate-500 text-xs">{{ label }}</div><div>{{ profile[key] }}</div></div>
-    {% endfor %}
-  </div>
-  {% if profile['matched_patterns'] and profile['matched_patterns'] != '{}' %}
-  <details class="mt-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-xs text-slate-400">matched evidence</summary>
-    <pre class="text-xs mt-1 whitespace-pre-wrap">{{ profile['matched_patterns'] }}</pre>
-  </details>
+  {% if profile['pins_flag'] %}
+  <div class="ink2" style="margin-top:8px;padding-left:22px;font-size:14px">Layer: <b style="color:var(--ink)">{{ profile['pin_layer'] }}</b>{% if profile['pin_library'] %} · Library: <b style="color:var(--ink)">{{ profile['pin_library'] }}</b>{% endif %}</div>
   {% endif %}
-  {% else %}
-  <p class="text-slate-400 text-sm">Not classified yet. Run the classifier to detect pinning, TLS stack, App Attest and anti-tamper defenses. (Requires the app to be acquired first.)</p>
-  {% endif %}
-</section>
-
-<!-- Deep MobSF-style analysis -->
-<div class="flex items-center gap-2 mb-3">
-  <h3 class="text-sm font-semibold">Deep analysis</h3>
-  <button class="rounded bg-indigo-700 px-3 py-1 text-xs" hx-post="/app/{{ app_id }}/analyze"
-          hx-target="#an-action" hx-swap="innerHTML">Run deep analysis</button>
-  <span id="an-action" class="text-xs"></span>
-  {% if analysis %}<span class="text-xs text-slate-500">analyzed {{ analysis['analyzed_at'] }}</span>{% endif %}
 </div>
 
-{% if analysis %}
-  {% set a = analysis %}
-  {% if a['info_plist'] %}
-  <details class="mb-2 rounded bg-slate-900 p-2" open><summary class="cursor-pointer text-sm">Info.plist + permissions</summary>
-    <div class="text-xs mt-2 space-y-1">
-      {% for k,v in (a['info_plist'].get('summary') or {}).items() %}<div><span class="text-slate-500">{{ k }}:</span> {{ v }}</div>{% endfor %}
-      {% for k,v in (a['info_plist'].get('permissions') or {}).items() %}<div class="text-amber-300">{{ k }}: {{ v }}</div>{% endfor %}
-    </div>
-  </details>
-  {% endif %}
-  {% if a['ats'] %}
-  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">App Transport Security</summary>
-    <pre class="text-xs mt-2 whitespace-pre-wrap">{{ a['ats'] }}</pre>
-  </details>
-  {% endif %}
-  {% if a['entitlements'] %}
-  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Entitlements</summary>
-    <pre class="text-xs mt-2 whitespace-pre-wrap">{% for k,v in a['entitlements'].items() %}{{ k }} = {{ v }}
-{% endfor %}</pre>
-  </details>
-  {% endif %}
-  {% if a['sdks'] or a['frameworks'] %}
-  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Frameworks & SDKs</summary>
-    <div class="text-xs mt-2">
-      <div class="mb-1">SDKs: {% for s in a['sdks'] %}<span class="px-1 rounded bg-slate-700 mr-1">{{ s }}</span>{% endfor %}</div>
-      <div class="text-slate-400">Embedded: {{ (a['frameworks'].get('embedded') or [])|join(', ') }}</div>
-    </div>
-  </details>
-  {% endif %}
-  {% if a['crypto_hints'] %}
-  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Crypto / API usage</summary>
-    <div class="text-xs mt-2">{{ a['crypto_hints']|join(', ') }}</div>
-  </details>
-  {% endif %}
-  {% if a['secrets'] %}
-  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Secrets & URLs ({{ (a['secrets'].get('findings') or [])|length }} findings)</summary>
-    <div class="text-xs mt-2 space-y-1">
-      {% for f in (a['secrets'].get('findings') or []) %}
-      <div><span class="px-1 rounded {% if f['severity']=='high' %}bg-red-800{% elif f['severity']=='medium' %}bg-amber-700{% else %}bg-slate-700{% endif %}">{{ f['severity'] }}</span> {{ f['type'] }}: <span class="font-mono">{{ f['value'] }}</span></div>
-      {% endfor %}
-      <div class="text-slate-500 mt-1">URLs:</div>
-      {% for u in (a['secrets'].get('urls') or [])[:40] %}<div class="font-mono text-slate-400">{{ u }}</div>{% endfor %}
-    </div>
-  </details>
-  {% endif %}
-  {% if a['file_tree'] %}
-  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">File tree ({{ a['file_tree']|length }})</summary>
-    <div class="text-xs mt-2 font-mono max-h-64 overflow-auto">
-      {% for f in a['file_tree'][:200] %}<div>{{ (f['size']/1024)|round(1) }} KB  {{ f['path'] }}</div>{% endfor %}
-    </div>
-  </details>
-  {% endif %}
+<section class="tiles" style="margin-bottom:14px">
+  {% for label, key in [('TLS stack','tls_stack'),('App Attest','appattest_flag'),('DeviceCheck','devicecheck_flag'),('Anti-tamper','anti_tamper_hints'),('Anti-debug','anti_debug_hints'),('JB detect','jailbreak_detection_hints'),('NetworkExt','networkextension_flag')] %}
+  <div class="glass sm" style="padding:14px 16px"><div class="muted" style="font-size:11.5px;margin-bottom:5px">{{ label }}</div><div style="font-size:15px;font-weight:600">{{ profile[key] }}</div></div>
+  {% endfor %}
+</section>
+{% if profile['matched_patterns'] and profile['matched_patterns'] != '{}' %}
+<details class="card" style="margin-bottom:24px"><summary><span class="caret">›</span>Matched evidence</summary><pre class="dbody" style="font-size:11.5px;line-height:1.7;color:var(--ink2)">{{ profile['matched_patterns'] }}</pre></details>
+{% endif %}
+{% else %}
+<p class="muted" style="font-size:14px;margin-bottom:24px">Not classified yet. Run the classifier to detect pinning, TLS stack, App Attest and anti-tamper defenses. (Requires the app to be acquired.)</p>
+{% endif %}
+
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+  <h3 style="margin:0;font-size:15px;font-weight:700">Deep analysis</h3>
+  <button class="pill small primary" hx-post="/app/{{ app_id }}/analyze" hx-target="#an-action" hx-swap="innerHTML">Run deep analysis</button>
+  <span id="an-action"></span>
+  {% if analysis %}<span class="mono muted" style="font-size:12px">Analyzed {{ analysis['analyzed_at'] }}</span>{% endif %}
+</div>
+
+{% if analysis %}{% set a = analysis %}
+<div class="hlist">
+  {% if a['info_plist'] %}<details class="card" open><summary><span class="caret">›</span>Info.plist + permissions</summary>
+    <div class="dbody">
+      {% for k,v in (a['info_plist'].get('summary') or {}).items() %}<div style="font-size:12.5px;margin-bottom:4px"><span class="mono muted">{{ k }}:</span> {{ v }}</div>{% endfor %}
+      {% for k,v in (a['info_plist'].get('permissions') or {}).items() %}<div style="font-size:12.5px;color:#FF9F0A;margin-bottom:4px"><b>{{ k }}:</b> {{ v }}</div>{% endfor %}
+    </div></details>{% endif %}
+  {% if a['ats'] %}<details class="card"><summary><span class="caret">›</span>App Transport Security</summary><pre class="dbody" style="font-size:11.5px;color:var(--ink2)">{{ a['ats'] }}</pre></details>{% endif %}
+  {% if a['entitlements'] %}<details class="card"><summary><span class="caret">›</span>Entitlements</summary><div class="dbody">{% for k,v in a['entitlements'].items() %}<div class="mono" style="font-size:12px;margin-bottom:4px"><span style="color:var(--accent)">{{ k }}</span> = {{ v }}</div>{% endfor %}</div></details>{% endif %}
+  {% if a['sdks'] or a['frameworks'] %}<details class="card"><summary><span class="caret">›</span>Frameworks &amp; SDKs</summary><div class="dbody"><div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px">{% for s in a['sdks'] %}<span class="badge mono">{{ s }}</span>{% endfor %}</div><div class="muted" style="font-size:12px">Embedded: {{ (a['frameworks'].get('embedded') or [])|join(', ') }}</div></div></details>{% endif %}
+  {% if a['crypto_hints'] %}<details class="card"><summary><span class="caret">›</span>Crypto / API usage</summary><div class="dbody mono ink2" style="font-size:12.5px">{{ a['crypto_hints']|join(', ') }}</div></details>{% endif %}
+  {% if a['secrets'] %}<details class="card"><summary><span class="caret">›</span>Secrets &amp; URLs <span class="muted" style="font-weight:500">({{ (a['secrets'].get('findings') or [])|length }})</span></summary>
+    <div class="dbody">
+      {% for f in (a['secrets'].get('findings') or []) %}<div style="font-size:12.5px;margin-bottom:6px"><span class="state {{ 'failed' if f['severity']=='high' else 'running' if f['severity']=='medium' else 'queued' }}">{{ f['severity'] }}</span> {{ f['type'] }}: <span class="mono">{{ f['value'] }}</span></div>{% endfor %}
+      <div class="muted" style="font-size:11.5px;margin:6px 0 4px">URLs</div>
+      {% for u in (a['secrets'].get('urls') or [])[:40] %}<div class="mono ink2" style="font-size:12px">{{ u }}</div>{% endfor %}
+    </div></details>{% endif %}
+  {% if a['file_tree'] %}<details class="card"><summary><span class="caret">›</span>File tree <span class="muted" style="font-weight:500">({{ a['file_tree']|length }})</span></summary>
+    <div class="dbody" style="max-height:280px;overflow:auto">{% for f in a['file_tree'][:200] %}<div class="mono ink2" style="font-size:11.5px;white-space:nowrap"><span class="muted" style="display:inline-block;width:74px">{{ (f['size']/1024)|round(1) }} KB</span>{{ f['path'] }}</div>{% endfor %}</div></details>{% endif %}
+</div>
 {% endif %}

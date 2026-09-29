@@ -25,6 +25,7 @@ def corpus(request: Request, q: str = "", category: str = "", pinned: str = "",
         "q": q, "category": category, "pinned": pinned,
         "acquired": acquired, "attest": attest,
         "categories": db.categories(),
+        "nav": "corpus",
     }
     # HTMX partial refresh vs full page.
     if request.headers.get("HX-Request"):

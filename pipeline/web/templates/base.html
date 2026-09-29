@@ -2,14 +2,35 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{% block title %}Satella Console{% endblock %}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/static/console.css">
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
+  <script>
+    (function(){try{var t=localStorage.getItem('satella-theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
+    function setTheme(t){try{localStorage.setItem('satella-theme',t);}catch(e){}
+      if(t==='auto')document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme',t);}
+  </script>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen">
-  <main class="max-w-5xl mx-auto p-4 pb-24">{% block content %}{% endblock %}</main>
+<body>
+  <div class="blobs" aria-hidden="true"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
+  <div class="wrap">
+    <div class="page-head">
+      <div>
+        <div class="brand"><span class="mark"><i></i></span><span>Satella</span></div>
+        <h1 class="title">{% block h1 %}Console{% endblock %}</h1>
+        {% block subtitle %}{% endblock %}
+      </div>
+      <div style="display:flex;padding:3px;gap:2px;border-radius:13px;background:var(--field);border:1px solid var(--field-brd)">
+        <button class="pill small" style="background:none;border:none" onclick="setTheme('auto')">Auto</button>
+        <button class="pill small" style="background:none;border:none" onclick="setTheme('light')">Light</button>
+        <button class="pill small" style="background:none;border:none" onclick="setTheme('dark')">Dark</button>
+      </div>
+    </div>
+    {% block content %}{% endblock %}
+  </div>
   {% block nav %}{% include "_nav.html" %}{% endblock %}
 </body>
 </html>

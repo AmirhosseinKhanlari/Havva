@@ -1,32 +1,32 @@
 <div id="corpus-results">
-  <p class="text-slate-400 text-xs mb-2">{{ total }} apps, page {{ page }}/{{ pages }}</p>
-  <table class="w-full text-sm">
-    <thead class="text-slate-400"><tr>
-      <th class="text-left p-1">Name</th>
-      <th class="text-left p-1 hidden sm:table-cell">Category</th>
-      <th class="text-left p-1">Acq</th>
-      <th class="text-left p-1">Pin</th>
-      <th class="text-left p-1">Att</th>
-    </tr></thead>
-    <tbody>
+  <p class="muted" style="font-size:12.5px;margin:0 0 12px">{{ total }} apps · page {{ page }}/{{ pages }}</p>
+  <div class="rows">
     {% for r in rows %}
-      <tr class="border-t border-slate-800 hover:bg-slate-900 cursor-pointer"
-          onclick="window.location='/app/{{ r['app_id'] }}'">
-        <td class="p-1">
-          <div class="font-medium">{{ r['name'] or r['app_id'] }}</div>
-          <div class="text-xs text-slate-500 font-mono">{{ r['bundle_id'] or '' }}</div>
-        </td>
-        <td class="p-1 hidden sm:table-cell text-xs">{{ r['primary_category'] or '' }}</td>
-        <td class="p-1">{% if r['acquired'] %}<span class="text-emerald-400">yes</span>{% else %}<span class="text-slate-600">no</span>{% endif %}</td>
-        <td class="p-1">{% if r['pinned'] %}<span class="text-amber-400">yes</span>{% else %}<span class="text-slate-600">-</span>{% endif %}</td>
-        <td class="p-1">{% if r['attest'] %}<span class="text-indigo-400">yes</span>{% else %}<span class="text-slate-600">-</span>{% endif %}</td>
-      </tr>
+    {% set tints = [('#0A84FF','#5E5CE6'),('#FF9F0A','#FF375F'),('#30D158','#0A84FF'),('#BF5AF2','#5E5CE6'),('#FF453A','#FF9F0A'),('#64D2FF','#0A84FF')] %}
+    {% set tint = tints[loop.index0 % 6] %}
+    <a class="row" href="/app/{{ r['app_id'] }}">
+      {% if r['artwork_url'] %}
+      <img class="appicon" src="{{ r['artwork_url'] }}" alt="" loading="lazy"
+           onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'appicon ph',style:'background:linear-gradient(150deg,{{ tint[0] }},{{ tint[1] }})',textContent:'{{ (r['name'] or '?')[0]|upper }}'}))">
+      {% else %}
+      <div class="appicon ph" style="background:linear-gradient(150deg,{{ tint[0] }},{{ tint[1] }})">{{ (r['name'] or '?')[0]|upper }}</div>
+      {% endif %}
+      <div style="min-width:0;flex:1">
+        <div class="name">{{ r['name'] or r['app_id'] }}</div>
+        <div class="sub mono">{{ r['bundle_id'] or '' }}</div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-shrink:0">
+        {% if r['acquired'] %}<span class="badge acq">ACQ</span>{% endif %}
+        {% if r['pinned'] %}<span class="badge pin">PIN</span>{% endif %}
+        {% if r['attest'] %}<span class="badge att">ATT</span>{% endif %}
+        <span class="chev">›</span>
+      </div>
+    </a>
     {% endfor %}
-    </tbody>
-  </table>
-  <div class="flex justify-between mt-3 text-sm">
+  </div>
+  <div style="display:flex;justify-content:space-between;margin-top:16px;font-size:14px">
     {% set base = '/corpus?q=' ~ q ~ '&category=' ~ category ~ '&pinned=' ~ pinned ~ '&acquired=' ~ acquired ~ '&attest=' ~ attest %}
-    {% if page > 1 %}<a class="text-indigo-400" href="{{ base }}&page={{ page-1 }}">prev</a>{% else %}<span></span>{% endif %}
-    {% if page < pages %}<a class="text-indigo-400" href="{{ base }}&page={{ page+1 }}">next</a>{% endif %}
+    {% if page > 1 %}<a href="{{ base }}&page={{ page-1 }}">‹ prev</a>{% else %}<span></span>{% endif %}
+    {% if page < pages %}<a href="{{ base }}&page={{ page+1 }}">next ›</a>{% endif %}
   </div>
 </div>

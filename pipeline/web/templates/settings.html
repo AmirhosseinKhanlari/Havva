@@ -1,30 +1,34 @@
 {% extends "base.html" %}
 {% block title %}Settings{% endblock %}
+{% block h1 %}Settings{% endblock %}
 {% block content %}
-<h1 class="text-lg font-semibold mb-3">Settings</h1>
+<div class="section hlist" style="gap:16px">
+  <section class="glass pad">
+    <h2 class="h2">Environment (.env)</h2>
+    <form hx-post="/settings/save" hx-target="#saved" hx-swap="innerHTML" class="hlist" style="gap:12px">
+      {% for key, help in editable %}
+      <label style="display:block">
+        <span class="mono ink2" style="display:block;font-size:12px;margin-bottom:5px">{{ key }}</span>
+        <input name="{{ key }}" value="{{ current[key] }}" placeholder="{{ help }}" class="field">
+        <span class="muted" style="display:block;font-size:11.5px;margin-top:5px">{{ help }}</span>
+      </label>
+      {% endfor %}
+      <div style="display:flex;align-items:center;gap:10px"><button class="pill primary">Save to .env</button><span id="saved"></span></div>
+    </form>
+  </section>
 
-<form hx-post="/settings/save" hx-target="#saved" hx-swap="innerHTML" class="space-y-2 mb-6">
-  {% for key, help in editable %}
-  <label class="block text-sm">
-    <span class="text-slate-400">{{ key }}</span>
-    <input name="{{ key }}" value="{{ current[key] }}" placeholder="{{ help }}"
-           class="w-full rounded bg-slate-800 px-2 py-1 mt-0.5">
-    <span class="text-xs text-slate-600">{{ help }}</span>
-  </label>
-  {% endfor %}
-  <button class="rounded bg-indigo-700 px-3 py-1 text-sm">Save (.env)</button>
-  <span id="saved" class="text-xs ml-2"></span>
-</form>
+  <section class="glass pad">
+    <h2 class="h2">Secrets (masked)</h2>
+    <div class="hlist" style="gap:6px">
+      {% for k, v in secrets.items() %}<div style="font-size:12.5px"><span class="mono muted">{{ k }}:</span> {{ v or '(unset)' }}</div>{% endfor %}
+      <p class="muted" style="font-size:12px">Edit secrets directly in .env, then restart.</p>
+    </div>
+  </section>
 
-<h2 class="text-sm text-slate-400 mb-1">Secrets (masked)</h2>
-<div class="text-xs space-y-1 mb-6">
-  {% for k, v in secrets.items() %}<div><span class="text-slate-500">{{ k }}:</span> {{ v or '(unset)' }}</div>{% endfor %}
-  <p class="text-slate-600">Edit secrets directly in .env, then restart the server.</p>
+  <section class="glass pad">
+    <h2 class="h2">Doctor</h2>
+    <button class="pill small" hx-get="/settings/doctor" hx-target="#doctor" hx-swap="innerHTML">Run checks</button>
+    <div id="doctor" style="margin-top:12px"></div>
+  </section>
 </div>
-
-<h2 class="text-sm text-slate-400 mb-1">Doctor</h2>
-<button class="rounded bg-slate-700 px-3 py-1 text-sm mb-2" hx-get="/settings/doctor"
-        hx-target="#doctor" hx-swap="innerHTML">Run checks</button>
-<div id="doctor"></div>
-<p class="text-xs text-slate-600 mt-4">Changes to .env apply on next server restart.</p>
 {% endblock %}

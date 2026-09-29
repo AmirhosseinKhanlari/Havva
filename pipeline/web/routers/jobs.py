@@ -12,7 +12,7 @@ router = APIRouter()
 
 @router.get("/jobs")
 def jobs_page(request: Request, _: None = Depends(require_auth)):
-    return templates.TemplateResponse(request, "jobs.html", {"request": request, "jobs": get_db().list_jobs()})
+    return templates.TemplateResponse(request, "jobs.html", {"request": request, "jobs": get_db().list_jobs(), "nav": "jobs"})
 
 
 @router.get("/jobs/list")

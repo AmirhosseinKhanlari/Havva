@@ -29,7 +29,7 @@ def _app_or_404(app_id: str):
 def _tab_context(request: Request, app_id: str, tab: str) -> dict:
     db = get_db()
     app = _app_or_404(app_id)
-    ctx = {"request": request, "app": app, "app_id": app_id, "tab": tab, "tabs": TABS}
+    ctx = {"request": request, "app": app, "app_id": app_id, "tab": tab, "tabs": TABS, "nav": "corpus"}
     if tab == "acquire":
         ctx["acq"] = db.get_acquisition(app_id)
     elif tab == "static":

@@ -83,6 +83,7 @@ def dashboard(request: Request, _: None = Depends(require_auth)):
         "metrics": metrics,
         "health": health(),
         "jobs": db.list_jobs(10),
+        "nav": "dash",
     })
 
 

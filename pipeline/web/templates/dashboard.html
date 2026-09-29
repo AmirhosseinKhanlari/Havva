@@ -1,42 +1,48 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
+{% block h1 %}Dashboard{% endblock %}
+{% block subtitle %}<p class="subtitle">iOS pinning &amp; attestation measurement</p>{% endblock %}
 {% block content %}
-<h1 class="text-lg font-semibold mb-3">Dashboard</h1>
-
-<section class="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
-  {% for label, key in [('Apps','apps'),('Acquired','acquired'),('Static','static_done'),('Pinned','pinned'),('Attest','appattest'),('Tested','attested_tested')] %}
-  <div class="rounded bg-slate-900 p-3">
-    <div class="text-2xl font-bold">{{ counts.get(key, 0) }}</div>
-    <div class="text-slate-400 text-xs">{{ label }}</div>
-  </div>
-  {% endfor %}
-</section>
-
-<section class="mb-4">
-  <h2 class="text-sm text-slate-400 mb-1">Health</h2>
-  <div class="flex flex-wrap gap-2 text-xs">
-    {% for label, key in [('iPhone 8','iphone8'),('iPhone XR','xr'),('iTunes server','itunes_server'),('ipadecrypt','ipadecrypt_bootstrapped')] %}
-    <span class="px-2 py-1 rounded {% if health[key] %}bg-emerald-700{% else %}bg-red-800{% endif %}">
-      {{ label }}: {{ 'up' if health[key] else 'down' }}</span>
+<div class="section">
+  <section class="tiles" style="margin-bottom:22px">
+    {% for label, key, dot in [('Apps','apps','var(--accent)'),('Acquired','acquired','var(--ok)'),('Static','static_done','var(--accent2)'),('Pinned','pinned','var(--warn)'),('Attest','appattest','var(--accent)'),('Tested','attested_tested','var(--ok)')] %}
+    <div class="tile"><div class="num">{{ counts.get(key, 0) }}</div><div class="lbl">{{ label }}</div><span class="dot" style="background:{{ dot }}"></span></div>
     {% endfor %}
-  </div>
-</section>
+  </section>
 
-<section class="mb-4">
-  <h2 class="text-sm text-slate-400 mb-1">Run</h2>
-  <div class="grid grid-cols-2 sm:grid-cols-4 gap-2" hx-target="#recent-jobs" hx-swap="innerHTML">
-    {% for k in ['crawl','acquire','static','analyze','iap','dynamic','attest','aggregate','full'] %}
-    <button class="rounded bg-indigo-700 px-2 py-2 text-sm"
-            hx-post="/run/{{ k }}"
-            hx-confirm="Run {{ k }} on the corpus?">{{ k }}</button>
-    {% endfor %}
-  </div>
-</section>
+  <section class="glass pad" style="margin-bottom:16px">
+    <h2 class="h2">Device health</h2>
+    <div class="hlist">
+      {% for label, key in [('iPhone 8 (decrypt)','iphone8'),('iPhone XR (test)','xr'),('iTunes server','itunes_server'),('ipadecrypt','ipadecrypt_bootstrapped')] %}
+      {% set col = 'var(--ok)' if health[key] else 'var(--bad)' %}
+      <div class="hitem">
+        <span class="hdot" style="background:{{ col }}"><i style="background:{{ col }}"></i></span>
+        <span style="flex:1;font-size:14px;font-weight:500">{{ label }}</span>
+        <span style="font-size:12.5px;font-weight:600;color:{{ col }}">{{ 'up' if health[key] else 'down' }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
 
-<section>
-  <h2 class="text-sm text-slate-400 mb-1">Recent jobs</h2>
-  <div id="recent-jobs" hx-get="/jobs/list" hx-trigger="every 3s" hx-swap="innerHTML">
-    {% include "_job_row.html" %}
-  </div>
-</section>
+  <section class="glass pad" style="margin-bottom:16px">
+    <h2 class="h2">Run pipeline</h2>
+    <p class="muted" style="margin:0 0 14px;font-size:13px">Queue a phase across the corpus. Live jobs appear below.</p>
+    <div class="chips" hx-target="#recent-jobs" hx-swap="innerHTML">
+      {% for k in ['crawl','acquire','static','analyze','iap','dynamic','attest','aggregate'] %}
+      <button class="pill" hx-post="/run/{{ k }}" hx-confirm="Run {{ k }} on the corpus?">{{ k }}</button>
+      {% endfor %}
+      <button class="pill primary" hx-post="/run/full" hx-confirm="Run the full pipeline?">full</button>
+    </div>
+  </section>
+
+  <section class="glass pad">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h2 class="h2" style="margin:0">Recent jobs</h2>
+      <a href="/jobs" style="font-size:13px;font-weight:600">View all</a>
+    </div>
+    <div id="recent-jobs" hx-get="/jobs/list" hx-trigger="every 3s" hx-swap="innerHTML">
+      {% include "_job_row.html" %}
+    </div>
+  </section>
+</div>
 {% endblock %}
