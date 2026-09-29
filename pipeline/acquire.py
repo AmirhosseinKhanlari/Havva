@@ -153,7 +153,9 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False,
                   that local file.
     """
     CONFIG.paths.ipa_dir.mkdir(parents=True, exist_ok=True)
-    out = CONFIG.paths.ipa_dir / f"{app_id}.ipa"
+    # Decrypted outputs are marked ".decrypted.ipa" so they're never confused
+    # with encrypted App Store IPAs.
+    out = CONFIG.paths.ipa_dir / f"{app_id}.decrypted.ipa"
     if out.exists() and out.stat().st_size > 0:
         return WorkState.POSITIVE, str(out), ""
 
