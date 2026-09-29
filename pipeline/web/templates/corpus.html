@@ -2,23 +2,60 @@
 {% block title %}Corpus{% endblock %}
 {% block h1 %}Corpus{% endblock %}
 {% block content %}
+{% macro sel(name, label, options, blank='Any') %}
+<label style="display:flex;flex-direction:column;gap:4px">
+  <span class="muted" style="font-size:11px">{{ label }}</span>
+  <select name="{{ name }}" class="field"><option value="">{{ blank }}</option>
+    {% for o in options %}<option value="{{ o }}" {% if o==f[name] %}selected{% endif %}>{{ o }}</option>{% endfor %}
+  </select>
+</label>
+{% endmacro %}
+{% macro tri(name, label, yes='Yes', no='No') %}
+<label style="display:flex;flex-direction:column;gap:4px">
+  <span class="muted" style="font-size:11px">{{ label }}</span>
+  <select name="{{ name }}" class="field"><option value="">Any</option>
+    <option value="1" {% if f[name]=='1' %}selected{% endif %}>{{ yes }}</option>
+    <option value="0" {% if f[name]=='0' %}selected{% endif %}>{{ no }}</option>
+  </select>
+</label>
+{% endmacro %}
 <div class="section">
-  <form hx-get="/corpus" hx-target="#corpus-results" hx-swap="outerHTML"
-        hx-trigger="submit, change from:select, keyup changed delay:400ms from:input[name='q']">
-    <div class="searchbar" style="margin-bottom:14px">
+  <form id="filters" hx-get="/corpus" hx-target="#corpus-results" hx-swap="outerHTML"
+        hx-trigger="submit, change, keyup changed delay:400ms from:input">
+    <div class="searchbar" style="margin-bottom:12px">
       <div style="width:16px;height:16px;border-radius:50%;border:2px solid var(--ink3)"></div>
-      <input name="q" value="{{ q }}" placeholder="Search name, bundle id, or app id">
+      <input name="q" value="{{ f['q'] }}" placeholder="Search name, bundle id, or app id">
       <span class="muted" style="font-size:12.5px;white-space:nowrap">{{ total }} apps</span>
     </div>
-    <div class="chips" style="margin-bottom:18px">
-      <select name="category" class="chip" style="appearance:none">
-        <option value="">All categories</option>
-        {% for c in categories %}<option value="{{ c }}" {% if c==category %}selected{% endif %}>{{ c }}</option>{% endfor %}
-      </select>
-      <select name="acquired" class="chip"><option value="">Acquired: any</option><option value="1" {% if acquired=='1' %}selected{% endif %}>Acquired</option><option value="0" {% if acquired=='0' %}selected{% endif %}>Not acquired</option></select>
-      <select name="pinned" class="chip"><option value="">Pinning: any</option><option value="1" {% if pinned=='1' %}selected{% endif %}>Pinned</option><option value="0" {% if pinned=='0' %}selected{% endif %}>Not pinned</option></select>
-      <select name="attest" class="chip"><option value="">Attest: any</option><option value="1" {% if attest=='1' %}selected{% endif %}>Adopts</option><option value="0" {% if attest=='0' %}selected{% endif %}>None</option></select>
-    </div>
+
+    <details class="card" style="margin-bottom:16px" {% if qs %}open{% endif %}>
+      <summary><span class="caret">›</span>Filters{% if qs %} <span class="badge att" style="margin-left:6px">active</span>{% endif %}</summary>
+      <div class="dbody" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;padding-top:6px">
+        {{ sel('category','Category', opts.categories) }}
+        {{ sel('country','Country', opts.countries) }}
+        {{ sel('content_rating','Content rating', opts.content_ratings) }}
+        {{ sel('tls_stack','TLS stack', opts.tls_stacks) }}
+        {{ sel('pin_library','Pin library', opts.pin_libraries) }}
+        {{ tri('pinned','SSL pinning','Pinned','Not pinned') }}
+        {{ tri('attest','App Attest','Adopts','None') }}
+        {{ tri('devicecheck','DeviceCheck') }}
+        {{ tri('anti_tamper','Anti-tamper','Present','None') }}
+        {{ tri('has_iap','In-app purchases') }}
+        {{ tri('acquired','Acquired') }}
+        {{ tri('static_done','Classified') }}
+        <label style="display:flex;flex-direction:column;gap:4px"><span class="muted" style="font-size:11px">Price</span>
+          <select name="price" class="field"><option value="">Any</option>
+            <option value="free" {% if f['price']=='free' %}selected{% endif %}>Free</option>
+            <option value="paid" {% if f['price']=='paid' %}selected{% endif %}>Paid</option></select></label>
+        <label style="display:flex;flex-direction:column;gap:4px"><span class="muted" style="font-size:11px">Min iOS ≥</span>
+          <input name="min_ios" value="{{ f['min_ios'] }}" placeholder="e.g. 15.0" class="field"></label>
+        <label style="display:flex;flex-direction:column;gap:4px"><span class="muted" style="font-size:11px">Min rating ≥</span>
+          <input name="min_rating" value="{{ f['min_rating'] }}" placeholder="e.g. 4.0" class="field"></label>
+        <label style="display:flex;flex-direction:column;gap:4px"><span class="muted" style="font-size:11px">Seller contains</span>
+          <input name="seller" value="{{ f['seller'] }}" placeholder="e.g. Yahoo" class="field"></label>
+      </div>
+      <div class="dbody" style="padding-top:0"><a href="/corpus" class="pill small">Clear all</a></div>
+    </details>
   </form>
   {% include "_corpus_table.html" %}
 </div>

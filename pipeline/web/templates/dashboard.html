@@ -28,10 +28,10 @@
     <h2 class="h2">Run pipeline</h2>
     <p class="muted" style="margin:0 0 14px;font-size:13px">Queue a phase across the corpus. Live jobs appear below.</p>
     <div class="chips" hx-target="#recent-jobs" hx-swap="innerHTML">
-      {% for k in ['crawl','acquire','static','analyze','iap','dynamic','attest','aggregate'] %}
-      <button class="pill" hx-post="/run/{{ k }}" hx-confirm="Run {{ k }} on the corpus?">{{ k }}</button>
+      {% for k, label, icon in [('crawl','Crawl','✎'),('acquire','Acquire','↓'),('static','Static','▤'),('analyze','Analyze','⌕'),('iap','IAP','⊕'),('dynamic','Dynamic','▶'),('attest','Attest','✓'),('aggregate','Aggregate','▦')] %}
+      <button class="pill" hx-post="/run/{{ k }}" hx-confirm="Run {{ label }} on the corpus?"><span style="opacity:.75">{{ icon }}</span>{{ label }}</button>
       {% endfor %}
-      <button class="pill primary" hx-post="/run/full" hx-confirm="Run the full pipeline?">full</button>
+      <button class="pill primary" hx-post="/run/full" hx-confirm="Run the full pipeline?"><span style="opacity:.85">⣿</span>Full</button>
     </div>
   </section>
 

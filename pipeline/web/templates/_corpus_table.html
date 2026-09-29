@@ -25,7 +25,7 @@
     {% endfor %}
   </div>
   <div style="display:flex;justify-content:space-between;margin-top:16px;font-size:14px">
-    {% set base = '/corpus?q=' ~ q ~ '&category=' ~ category ~ '&pinned=' ~ pinned ~ '&acquired=' ~ acquired ~ '&attest=' ~ attest %}
+    {% set base = '/corpus?' ~ qs %}
     {% if page > 1 %}<a href="{{ base }}&page={{ page-1 }}">‹ prev</a>{% else %}<span></span>{% endif %}
     {% if page < pages %}<a href="{{ base }}&page={{ page+1 }}">next ›</a>{% endif %}
   </div>

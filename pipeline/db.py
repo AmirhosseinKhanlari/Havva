@@ -406,19 +406,48 @@ class Database:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM apps WHERE app_id=?", (app_id,)).fetchone()
 
-    def categories(self) -> list[str]:
+    def _distinct(self, table: str, column: str, nonempty: bool = True) -> list[str]:
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT primary_category FROM apps "
-                "WHERE primary_category IS NOT NULL ORDER BY primary_category").fetchall()
-            return [r[0] for r in rows]
+            sql = f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL"
+            if nonempty:
+                sql += f" AND {column} != ''"
+            sql += f" ORDER BY {column}"
+            return [r[0] for r in conn.execute(sql).fetchall()]
+
+    def categories(self) -> list[str]:
+        return self._distinct("apps", "primary_category")
+
+    def countries(self) -> list[str]:
+        return self._distinct("apps", "country")
+
+    def content_ratings(self) -> list[str]:
+        return self._distinct("apps", "content_rating")
+
+    def tls_stacks(self) -> list[str]:
+        return self._distinct("static_profile", "tls_stack")
+
+    def pin_libraries(self) -> list[str]:
+        return self._distinct("static_profile", "pin_library")
+
+    def filter_options(self) -> dict:
+        """All dropdown option lists for the corpus filter UI."""
+        return {
+            "categories": self.categories(),
+            "countries": self.countries(),
+            "content_ratings": self.content_ratings(),
+            "tls_stacks": self.tls_stacks(),
+            "pin_libraries": self.pin_libraries(),
+        }
 
     def search_apps(self, q: str = "", category: str = "", pinned: str = "",
-                    acquired: str = "", attest: str = "",
+                    acquired: str = "", attest: str = "", country: str = "",
+                    devicecheck: str = "", anti_tamper: str = "", tls_stack: str = "",
+                    pin_library: str = "", has_iap: str = "", price: str = "",
+                    content_rating: str = "", min_ios: str = "", min_rating: str = "",
+                    static_done: str = "", seller: str = "",
                     limit: int = 50, offset: int = 0):
-        """Filtered corpus query. Returns (rows, total_count).
-
-        pinned/acquired/attest are '' (any), '1' (yes) or '0' (no)."""
+        """Filtered corpus query. Returns (rows, total_count). Every filter is
+        optional; '' means 'any'. Boolean-ish filters take '1'/'0'."""
         joins = ("LEFT JOIN acquisition ac ON ac.app_id=a.app_id "
                  "LEFT JOIN static_profile s ON s.app_id=a.app_id")
         where = []
@@ -428,10 +457,46 @@ class Database:
             params += [f"%{q}%", f"%{q}%", f"%{q}%"]
         if category:
             where.append("a.primary_category=?"); params.append(category)
+        if country:
+            where.append("a.country=?"); params.append(country)
+        if seller:
+            where.append("a.seller_name LIKE ?"); params.append(f"%{seller}%")
+        if content_rating:
+            where.append("a.content_rating=?"); params.append(content_rating)
+        if tls_stack:
+            where.append("s.tls_stack=?"); params.append(tls_stack)
+        if pin_library:
+            where.append("s.pin_library=?"); params.append(pin_library)
         if pinned in ("0", "1"):
             where.append("COALESCE(s.pins_flag,0)=?"); params.append(int(pinned))
         if attest in ("0", "1"):
             where.append("COALESCE(s.appattest_flag,0)=?"); params.append(int(attest))
+        if devicecheck in ("0", "1"):
+            where.append("COALESCE(s.devicecheck_flag,0)=?"); params.append(int(devicecheck))
+        if anti_tamper == "1":
+            where.append("COALESCE(s.anti_tamper_hints,0) > 0")
+        elif anti_tamper == "0":
+            where.append("COALESCE(s.anti_tamper_hints,0) = 0")
+        if has_iap in ("0", "1"):
+            where.append("COALESCE(a.has_iap,0)=?"); params.append(int(has_iap))
+        if price == "free":
+            where.append("COALESCE(a.price,0)=0")
+        elif price == "paid":
+            where.append("COALESCE(a.price,0) > 0")
+        if min_ios:
+            try:
+                where.append("CAST(a.minimum_os AS REAL) >= ?"); params.append(float(min_ios))
+            except ValueError:
+                pass
+        if min_rating:
+            try:
+                where.append("COALESCE(a.avg_rating,0) >= ?"); params.append(float(min_rating))
+            except ValueError:
+                pass
+        if static_done == "1":
+            where.append("COALESCE(s.static_state,0)=1")
+        elif static_done == "0":
+            where.append("COALESCE(s.static_state,0)=0")
         if acquired == "1":
             where.append("COALESCE(ac.decrypt_status,0)=1")
         elif acquired == "0":
