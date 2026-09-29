@@ -77,14 +77,20 @@ def app_tab(app_id: str, tab: str, request: Request, _: None = Depends(require_a
 def act_acquire(app_id: str, request: Request, version: str = Form(default=""),
                 _: None = Depends(require_auth)):
     app = _app_or_404(app_id)
-    bundle = app["bundle_id"]
-    numeric = app_id if str(app_id).isdigit() else None
+    # Key the acquisition by the SAME id as the corpus row (app_id), so the app
+    # detail page finds it. acquire_one keys by bundle_id when one is passed, so
+    # for a numeric corpus id we pass app_id only (numeric ids are App Store
+    # store ids, which both backends accept); for a non-numeric corpus id we fall
+    # back to the bundle.
+    numeric = str(app_id).isdigit()
+    bundle = None if numeric else app["bundle_id"]
+    store_id = app_id if numeric else None
 
     def job(ctx):
         from ... import acquire
         with tee_pipeline_logs(ctx):
             state, path, err = acquire.acquire_one(
-                get_db(), bundle_id=bundle, app_id=numeric,
+                get_db(), bundle_id=bundle, app_id=store_id,
                 country=app["country"] or "us", app_ver_id=version or None)
         ctx.log(f"result: {state.name} {path or err}\n")
 

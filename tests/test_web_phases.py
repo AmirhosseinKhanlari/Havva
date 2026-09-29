@@ -86,6 +86,34 @@ def test_download_missing_is_404():
     assert c.get("/app/999/download").status_code == 404
 
 
+def test_acquire_action_keys_by_corpus_app_id(monkeypatch):
+    """Regression: acquiring from app detail must record the acquisition under the
+    same (numeric) app_id as the corpus row, not under the bundle id."""
+    import time
+
+    import pipeline.acquire as acq
+    from pipeline.models import WorkState
+    c, appmod = _client(tempfile.mkdtemp())
+    db = appmod.get_db()
+    db.upsert_app("555", "us", bundle_id="com.example.app", name="Ex")
+
+    captured = {}
+
+    def fake_acquire_one(database, bundle_id=None, app_id=None, **kw):
+        captured["bundle_id"] = bundle_id
+        captured["app_id"] = app_id
+        return WorkState.POSITIVE, "ipas/555.decrypted.ipa", ""
+
+    monkeypatch.setattr(acq, "acquire_one", fake_acquire_one)
+    r = c.post("/app/555/acquire", data={"version": ""})
+    assert r.status_code == 200
+    end = time.time() + 5
+    while time.time() < end and "app_id" not in captured:
+        time.sleep(0.02)
+    assert captured.get("app_id") == "555"
+    assert captured.get("bundle_id") is None
+
+
 def test_settings_page_and_doctor():
     c, _ = _client(tempfile.mkdtemp())
     assert c.get("/settings").status_code == 200
