@@ -1,0 +1,73 @@
+{% if not profile and not analysis %}
+<p class="text-slate-400 text-sm">No static classification or deep analysis yet.</p>
+{% endif %}
+
+{% if profile %}
+<h3 class="text-sm font-semibold mb-1">Classifier verdict</h3>
+<div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm mb-4">
+  {% for label, key in [('Pinned','pins_flag'),('Pin layer','pin_layer'),('Pin library','pin_library'),('TLS stack','tls_stack'),('App Attest','appattest_flag'),('DeviceCheck','devicecheck_flag'),('Anti-tamper','anti_tamper_hints'),('Anti-debug','anti_debug_hints'),('JB detect','jailbreak_detection_hints')] %}
+  <div class="rounded bg-slate-900 p-2"><div class="text-slate-500 text-xs">{{ label }}</div><div>{{ profile[key] }}</div></div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="flex items-center gap-2 mb-3">
+  <button class="rounded bg-indigo-700 px-3 py-1 text-sm" hx-post="/app/{{ app_id }}/analyze"
+          hx-target="#an-action" hx-swap="innerHTML">Run deep analysis</button>
+  <span id="an-action" class="text-xs"></span>
+  {% if analysis %}<span class="text-xs text-slate-500">analyzed {{ analysis['analyzed_at'] }}</span>{% endif %}
+</div>
+
+{% if analysis %}
+  {% set a = analysis %}
+  {% if a['info_plist'] %}
+  <details class="mb-2 rounded bg-slate-900 p-2" open><summary class="cursor-pointer text-sm">Info.plist + permissions</summary>
+    <div class="text-xs mt-2 space-y-1">
+      {% for k,v in (a['info_plist'].get('summary') or {}).items() %}<div><span class="text-slate-500">{{ k }}:</span> {{ v }}</div>{% endfor %}
+      {% for k,v in (a['info_plist'].get('permissions') or {}).items() %}<div class="text-amber-300">{{ k }}: {{ v }}</div>{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% if a['ats'] %}
+  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">App Transport Security</summary>
+    <pre class="text-xs mt-2 whitespace-pre-wrap">{{ a['ats'] }}</pre>
+  </details>
+  {% endif %}
+  {% if a['entitlements'] %}
+  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Entitlements</summary>
+    <pre class="text-xs mt-2 whitespace-pre-wrap">{% for k,v in a['entitlements'].items() %}{{ k }} = {{ v }}
+{% endfor %}</pre>
+  </details>
+  {% endif %}
+  {% if a['sdks'] or a['frameworks'] %}
+  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Frameworks & SDKs</summary>
+    <div class="text-xs mt-2">
+      <div class="mb-1">SDKs: {% for s in a['sdks'] %}<span class="px-1 rounded bg-slate-700 mr-1">{{ s }}</span>{% endfor %}</div>
+      <div class="text-slate-400">Embedded: {{ (a['frameworks'].get('embedded') or [])|join(', ') }}</div>
+    </div>
+  </details>
+  {% endif %}
+  {% if a['crypto_hints'] %}
+  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Crypto / API usage</summary>
+    <div class="text-xs mt-2">{{ a['crypto_hints']|join(', ') }}</div>
+  </details>
+  {% endif %}
+  {% if a['secrets'] %}
+  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">Secrets & URLs ({{ (a['secrets'].get('findings') or [])|length }} findings)</summary>
+    <div class="text-xs mt-2 space-y-1">
+      {% for f in (a['secrets'].get('findings') or []) %}
+      <div><span class="px-1 rounded {% if f['severity']=='high' %}bg-red-800{% elif f['severity']=='medium' %}bg-amber-700{% else %}bg-slate-700{% endif %}">{{ f['severity'] }}</span> {{ f['type'] }}: <span class="font-mono">{{ f['value'] }}</span></div>
+      {% endfor %}
+      <div class="text-slate-500 mt-1">URLs:</div>
+      {% for u in (a['secrets'].get('urls') or [])[:40] %}<div class="font-mono text-slate-400">{{ u }}</div>{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% if a['file_tree'] %}
+  <details class="mb-2 rounded bg-slate-900 p-2"><summary class="cursor-pointer text-sm">File tree ({{ a['file_tree']|length }})</summary>
+    <div class="text-xs mt-2 font-mono max-h-64 overflow-auto">
+      {% for f in a['file_tree'][:200] %}<div>{{ (f['size']/1024)|round(1) }} KB  {{ f['path'] }}</div>{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+{% endif %}

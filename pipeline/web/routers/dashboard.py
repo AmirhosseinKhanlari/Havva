@@ -14,7 +14,8 @@ router = APIRouter()
 
 def _job_fns():
     """kind -> (factory returning a JobContext-taking fn, device_bound)."""
-    from ... import acquire, aggregate, attestation, crawl, dynamic, iap, static_classify
+    from ... import (acquire, aggregate, analysis, attestation, crawl, dynamic,
+                     iap, static_classify)
 
     def wrap(run_callable):
         def job(ctx):
@@ -27,6 +28,7 @@ def _job_fns():
         "crawl":     (lambda: wrap(lambda db: crawl.crawl(db)), False),
         "acquire":   (lambda: wrap(lambda db: acquire.run(db)), True),
         "static":    (lambda: wrap(lambda db: static_classify.run(db)), False),
+        "analyze":   (lambda: wrap(lambda db: analysis.run(db)), False),
         "dynamic":   (lambda: wrap(lambda db: dynamic.run(db)), True),
         "attest":    (lambda: wrap(lambda db: attestation.run(db)), True),
         "iap":       (lambda: wrap(lambda db: iap.run(db)), False),
@@ -82,16 +84,6 @@ def dashboard(request: Request, _: None = Depends(require_auth)):
         "health": health(),
         "jobs": db.list_jobs(10),
     })
-
-
-@router.get("/corpus")
-def corpus_stub(request: Request, _: None = Depends(require_auth)):
-    return templates.TemplateResponse(request, "_stub.html", {"request": request, "title": "Corpus"})
-
-
-@router.get("/settings")
-def settings_stub(request: Request, _: None = Depends(require_auth)):
-    return templates.TemplateResponse(request, "_stub.html", {"request": request, "title": "Settings"})
 
 
 @router.post("/run/{kind}")

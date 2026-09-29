@@ -44,10 +44,16 @@ def create_app() -> FastAPI:
     from .auth import mount_auth
     mount_auth(app)
 
+    from .routers import app_detail as app_detail_router
+    from .routers import corpus as corpus_router
     from .routers import dashboard as dashboard_router
     from .routers import jobs as jobs_router
+    from .routers import settings as settings_router
     app.include_router(dashboard_router.router)
+    app.include_router(corpus_router.router)
+    app.include_router(app_detail_router.router)
     app.include_router(jobs_router.router)
+    app.include_router(settings_router.router)
 
     # Turn a require_auth redirect (307 + Location) into a real redirect.
     @app.exception_handler(_HTTPExc)

@@ -1,0 +1,18 @@
+{% if error %}<p class="text-red-400 text-xs">{{ error }}</p>{% endif %}
+{% if versions %}
+<table class="w-full text-xs mt-2">
+  <tbody>
+  {% for v in versions %}
+  <tr class="border-t border-slate-800">
+    <td class="p-1">{{ v['shortVersion'] }}</td>
+    <td class="p-1 font-mono text-slate-500">{{ v['verId'] }}</td>
+    <td class="p-1 text-right">
+      <button class="text-indigo-400" hx-post="/app/{{ app_id }}/acquire"
+              hx-vals='{"version": "{{ v['verId'] }}"}'
+              hx-target="#acq-action" hx-swap="innerHTML">get</button>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}

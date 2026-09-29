@@ -400,6 +400,94 @@ class Database:
         with self.connect() as conn:
             return conn.execute(q).fetchall()
 
+    # ---- Web reads ------------------------------------------------------
+
+    def get_app(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM apps WHERE app_id=?", (app_id,)).fetchone()
+
+    def categories(self) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT primary_category FROM apps "
+                "WHERE primary_category IS NOT NULL ORDER BY primary_category").fetchall()
+            return [r[0] for r in rows]
+
+    def search_apps(self, q: str = "", category: str = "", pinned: str = "",
+                    acquired: str = "", attest: str = "",
+                    limit: int = 50, offset: int = 0):
+        """Filtered corpus query. Returns (rows, total_count).
+
+        pinned/acquired/attest are '' (any), '1' (yes) or '0' (no)."""
+        joins = ("LEFT JOIN acquisition ac ON ac.app_id=a.app_id "
+                 "LEFT JOIN static_profile s ON s.app_id=a.app_id")
+        where = []
+        params: list = []
+        if q:
+            where.append("(a.name LIKE ? OR a.bundle_id LIKE ? OR a.app_id LIKE ?)")
+            params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        if category:
+            where.append("a.primary_category=?"); params.append(category)
+        if pinned in ("0", "1"):
+            where.append("COALESCE(s.pins_flag,0)=?"); params.append(int(pinned))
+        if attest in ("0", "1"):
+            where.append("COALESCE(s.appattest_flag,0)=?"); params.append(int(attest))
+        if acquired == "1":
+            where.append("COALESCE(ac.decrypt_status,0)=1")
+        elif acquired == "0":
+            where.append("COALESCE(ac.decrypt_status,0)=0")
+        wsql = ("WHERE " + " AND ".join(where)) if where else ""
+        with self.connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM apps a {joins} {wsql}", params).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT a.app_id, a.name, a.bundle_id, a.primary_category, "
+                f"COALESCE(ac.decrypt_status,0) AS acquired, "
+                f"COALESCE(s.pins_flag,0) AS pinned, "
+                f"COALESCE(s.appattest_flag,0) AS attest "
+                f"FROM apps a {joins} {wsql} "
+                f"ORDER BY a.rank IS NULL, a.rank LIMIT ? OFFSET ?",
+                (*params, limit, offset)).fetchall()
+            return rows, total
+
+    def get_acquisition(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM acquisition WHERE app_id=?", (app_id,)).fetchone()
+
+    def get_static_profile(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM static_profile WHERE app_id=?", (app_id,)).fetchone()
+
+    def get_outcome(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM outcome WHERE app_id=?", (app_id,)).fetchone()
+
+    def get_dynamic_runs(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM dynamic_runs WHERE app_id=? ORDER BY id", (app_id,)).fetchall()
+
+    def get_attestation(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM attestation WHERE app_id=?", (app_id,)).fetchone()
+
+    def save_analysis(self, app_id: str, data: dict) -> None:
+        cols = ("info_plist", "entitlements", "ats", "frameworks", "sdks",
+                "secrets", "file_tree", "crypto_hints")
+        vals = [json.dumps(data.get(c)) for c in cols]
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO analysis (app_id, {', '.join(cols)}, analyzed_at) "
+                f"VALUES (?, {', '.join('?' * len(cols))}, ?) "
+                f"ON CONFLICT(app_id) DO UPDATE SET "
+                + ", ".join(f"{c}=excluded.{c}" for c in cols)
+                + ", analyzed_at=excluded.analyzed_at",
+                (app_id, *vals, _now()))
+
+    def get_analysis(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM analysis WHERE app_id=?", (app_id,)).fetchone()
+
     def counts(self) -> dict[str, int]:
         with self.connect() as conn:
             def one(sql: str) -> int:

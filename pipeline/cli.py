@@ -75,6 +75,18 @@ def cmd_static(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    from . import analysis
+    db = Database(CONFIG.paths.db)
+    if args.app_id:
+        report = analysis.analyze_one(db, args.app_id)
+        print(f"analyzed {args.app_id}: {len(report['sdks'])} SDKs, "
+              f"{len(report['secrets'].get('findings', []))} secret findings")
+        return 0
+    print(analysis.run(db, limit=args.limit))
+    return 0
+
+
 def cmd_dynamic(args: argparse.Namespace) -> int:
     from . import dynamic
     db = Database(CONFIG.paths.db)
@@ -225,6 +237,11 @@ def main() -> int:
     p_static = sub.add_parser("static", help="static defense classifier over decrypted IPAs")
     p_static.add_argument("--limit", type=int, help="max apps this run")
     p_static.set_defaults(func=cmd_static)
+
+    p_an = sub.add_parser("analyze", help="deep MobSF-style analysis of decrypted IPAs")
+    p_an.add_argument("--app-id", help="analyze one app by id (else all acquired apps)")
+    p_an.add_argument("--limit", type=int, help="max apps this run (batch mode)")
+    p_an.set_defaults(func=cmd_analyze)
 
     p_dyn = sub.add_parser("dynamic", help="run the bypass ladder on pinned apps")
     p_dyn.add_argument("--limit", type=int, help="max apps this run")

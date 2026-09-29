@@ -2,9 +2,11 @@
 device-bound stages. Backed by the DB jobs table; streams logs for SSE."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Callable, Iterator
 
 from ..db import Database
@@ -116,6 +118,37 @@ class JobManager:
                     yield tail
                 return
             time.sleep(0.25)
+
+
+class _CtxLogHandler(logging.Handler):
+    def __init__(self, ctx: JobContext):
+        super().__init__()
+        self.ctx = ctx
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.ctx.log(self.format(record) + "\n")
+        except Exception:
+            pass
+
+
+_PIPELINE_LOGGERS = ("acquire", "analysis", "dynamic", "attestation", "appstore",
+                     "static", "iap", "crawl", "aggregate", "attest_detect")
+
+
+@contextmanager
+def tee_pipeline_logs(ctx: JobContext):
+    """Stream pipeline module logs into the job's live log for the duration."""
+    handler = _CtxLogHandler(ctx)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    loggers = [logging.getLogger(n) for n in _PIPELINE_LOGGERS]
+    for lg in loggers:
+        lg.addHandler(handler)
+    try:
+        yield
+    finally:
+        for lg in loggers:
+            lg.removeHandler(handler)
 
 
 _MANAGER: JobManager | None = None

@@ -1,0 +1,9 @@
+<dl class="grid grid-cols-2 gap-2 text-sm">
+  {% for label, key in [('Name','name'),('Bundle','bundle_id'),('Category','primary_category'),('Version','current_version'),('Price','formatted_price'),('IAP','has_iap'),('Rating','avg_rating'),('Size (MB)','file_size_bytes'),('Seller','seller_name'),('Min iOS','minimum_os')] %}
+  <div class="rounded bg-slate-900 p-2">
+    <div class="text-slate-500 text-xs">{{ label }}</div>
+    <div>{% if key=='file_size_bytes' and app[key] %}{{ (app[key]/1048576)|round(1) }}{% else %}{{ app[key] if app[key] not in (None,'') else '-' }}{% endif %}</div>
+  </div>
+  {% endfor %}
+</dl>
+{% if app['description'] %}<p class="mt-3 text-xs text-slate-400 whitespace-pre-line">{{ app['description'][:600] }}</p>{% endif %}

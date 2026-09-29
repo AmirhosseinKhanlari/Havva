@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1 class="text-lg font-semibold mb-3">Settings</h1>
+
+<form hx-post="/settings/save" hx-target="#saved" hx-swap="innerHTML" class="space-y-2 mb-6">
+  {% for key, help in editable %}
+  <label class="block text-sm">
+    <span class="text-slate-400">{{ key }}</span>
+    <input name="{{ key }}" value="{{ current[key] }}" placeholder="{{ help }}"
+           class="w-full rounded bg-slate-800 px-2 py-1 mt-0.5">
+    <span class="text-xs text-slate-600">{{ help }}</span>
+  </label>
+  {% endfor %}
+  <button class="rounded bg-indigo-700 px-3 py-1 text-sm">Save (.env)</button>
+  <span id="saved" class="text-xs ml-2"></span>
+</form>
+
+<h2 class="text-sm text-slate-400 mb-1">Secrets (masked)</h2>
+<div class="text-xs space-y-1 mb-6">
+  {% for k, v in secrets.items() %}<div><span class="text-slate-500">{{ k }}:</span> {{ v or '(unset)' }}</div>{% endfor %}
+  <p class="text-slate-600">Edit secrets directly in .env, then restart the server.</p>
+</div>
+
+<h2 class="text-sm text-slate-400 mb-1">Doctor</h2>
+<button class="rounded bg-slate-700 px-3 py-1 text-sm mb-2" hx-get="/settings/doctor"
+        hx-target="#doctor" hx-swap="innerHTML">Run checks</button>
+<div id="doctor"></div>
+<p class="text-xs text-slate-600 mt-4">Changes to .env apply on next server restart.</p>
+{% endblock %}

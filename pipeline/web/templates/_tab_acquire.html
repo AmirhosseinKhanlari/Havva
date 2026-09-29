@@ -1,0 +1,20 @@
+<div class="space-y-3 text-sm">
+  {% if acq and acq['decrypt_status']==1 %}
+    <div class="rounded bg-emerald-900/40 border border-emerald-700 p-3">
+      Decrypted: <span class="font-mono">{{ acq['ipa_path'] }}</span><br>
+      <a class="text-indigo-300 underline" href="/app/{{ app_id }}/download">Download decrypted IPA</a>
+    </div>
+  {% elif acq and acq['error'] %}
+    <div class="rounded bg-red-900/40 border border-red-700 p-3">Last attempt failed: {{ acq['error'][:200] }}</div>
+  {% else %}
+    <p class="text-slate-400">Not acquired yet.</p>
+  {% endif %}
+
+  <form hx-post="/app/{{ app_id }}/acquire" hx-target="#acq-action" hx-swap="innerHTML" class="flex gap-2 items-center">
+    <input name="version" placeholder="version (optional, e.g. 1.0.5)" class="rounded bg-slate-800 px-2 py-1 flex-1">
+    <button class="rounded bg-indigo-700 px-3 py-1">Download + decrypt</button>
+  </form>
+  <button class="text-indigo-400 text-xs" hx-get="/app/{{ app_id }}/versions" hx-target="#versions" hx-swap="innerHTML">List older versions</button>
+  <div id="versions"></div>
+  <div id="acq-action"></div>
+</div>
