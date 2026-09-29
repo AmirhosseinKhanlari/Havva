@@ -19,6 +19,28 @@ router = APIRouter()
 TABS = ("overview", "acquire", "static", "dynamic", "attest")
 
 
+def _decrypted_files(app_id: str) -> list[dict]:
+    """All decrypted IPAs on disk for this app (current + specific versions),
+    since acquiring multiple versions writes multiple files (the acquisition row
+    only records the latest)."""
+    import glob
+    from ...config import CONFIG
+    d = str(CONFIG.paths.ipa_dir)
+    out = []
+    for p in sorted(glob.glob(os.path.join(d, f"{app_id}*.decrypted.ipa"))):
+        name = os.path.basename(p)
+        if name != f"{app_id}.decrypted.ipa" and not name.startswith(f"{app_id}-v"):
+            continue  # avoid matching a different app whose id shares this prefix
+        rest = name[len(app_id):]
+        version = rest[2:].rsplit(".decrypted", 1)[0] if rest.startswith("-v") else "current"
+        try:
+            mb = round(os.path.getsize(p) / (1024 * 1024), 1)
+        except OSError:
+            mb = 0
+        out.append({"name": name, "version": version, "size_mb": mb})
+    return out
+
+
 def _app_or_404(app_id: str):
     row = get_db().get_app(app_id)
     if not row:
@@ -32,6 +54,7 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
     ctx = {"request": request, "app": app, "app_id": app_id, "tab": tab, "tabs": TABS, "nav": "corpus"}
     if tab == "acquire":
         ctx["acq"] = db.get_acquisition(app_id)
+        ctx["decrypted_files"] = _decrypted_files(app_id)
     elif tab == "static":
         prof = db.get_static_profile(app_id)
         ctx["profile"] = prof
@@ -157,7 +180,17 @@ def act_versions(app_id: str, request: Request, _: None = Depends(require_auth))
 
 
 @router.get("/app/{app_id}/download")
-def act_download(app_id: str, _: None = Depends(require_auth)):
+def act_download(app_id: str, file: str = "", _: None = Depends(require_auth)):
+    from ...config import CONFIG
+    if file:
+        # Serve a specific decrypted file (must belong to this app, no traversal).
+        base = os.path.basename(file)
+        if base != f"{app_id}.decrypted.ipa" and not base.startswith(f"{app_id}-v"):
+            raise HTTPException(status_code=400, detail="bad file")
+        path = os.path.join(str(CONFIG.paths.ipa_dir), base)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="file not found")
+        return FileResponse(path, filename=base, media_type="application/octet-stream")
     ac = get_db().get_acquisition(app_id)
     if not ac or not ac["ipa_path"] or not os.path.exists(ac["ipa_path"]):
         raise HTTPException(status_code=404, detail="no decrypted IPA for this app")

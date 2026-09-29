@@ -143,14 +143,47 @@ def lookup_app_id(bundle_id: str, country: str = "US") -> str | None:
     return str(infos.results[0].trackId)
 
 
+def _clean_store_error(msg: str) -> str:
+    low = (msg or "").lower()
+    if "redownload unavailable" in low:
+        return ("app is not in this Apple account's library; acquiring it first "
+                "failed (it may be a paid app)")
+    if "not authorized" in low or "not been purchased" in low:
+        return "app is not owned by this account (acquire it first)"
+    return (msg or "store error").split(",")[0][:180]
+
+
+def _ensure_license(store: StoreClient, app_id: str) -> str:
+    """Acquire the free license (STDQ buyProduct) so a redownload of any version
+    works. Swallows already-owned; returns '' on success or the error phrase
+    (e.g. a paid app that cannot be acquired for free)."""
+    try:
+        store.download(app_id, "", isRedownload=False)  # STDQ = acquire/purchase
+        return ""
+    except StoreException as e:
+        msg = str(e.errMsg or e).lower()
+        if any(m in msg for m in ("already", "purchased", "owned")):
+            return ""
+        return str(e.errMsg or e)
+    except Exception as e:  # noqa: BLE001
+        return str(e)
+
+
 def list_versions(app_id: str, server_url: str, limit: int | None = None
                   ) -> list[dict]:
     """Return the app's historical versions, newest first, as
     [{verId, shortVersion}]. Each entry costs one MZStore request (the store
     only reveals the short version per external version id), so pass `limit` to
-    cap how many of the newest builds to resolve."""
+    cap how many of the newest builds to resolve.
+
+    Redownloading versions requires the app to be in the account's library, so we
+    acquire the free license first (needed for apps not yet downloaded)."""
     store = _store_client(server_url)
-    resp = store.download(app_id, "", isRedownload=True)
+    _ensure_license(store, app_id)
+    try:
+        resp = store.download(app_id, "", isRedownload=True)
+    except StoreException as e:
+        raise RuntimeError(_clean_store_error(str(e.errMsg or e)))
     if not resp.songList:
         return []
     ver_ids = list(resp.songList[0].metadata.softwareVersionExternalIdentifiers)
@@ -188,36 +221,48 @@ def download_encrypted(app_id: str, out_dir: str, server_url: str,
     server. Returns (ok, path, error). The .sinf license is embedded so the
     iPhone 8 can decrypt it afterwards.
 
-    Tries STDQ (acquire the license, needed for not-yet-owned apps) first, then
-    falls back to STDRDL (redownload an already-owned app)."""
+    For the current build: STDQ (acquire) first, then STDRDL. For a specific OLD
+    build: acquire the free license first (redownload requires ownership), then
+    STDRDL that version."""
     os.makedirs(out_dir, exist_ok=True)
     store = _store_client(server_url)
 
-    last_err = ""
-    for is_redownload in (False, True):  # STDQ (acquire) first, then STDRDL
-        try:
-            resp = store.download(app_id, app_ver_id or "", isRedownload=is_redownload)
-            if not resp.songList:
-                last_err = "no songList in download response"
-                continue
-            info = resp.songList[0]
-            bundle = info.metadata.softwareVersionBundleId
-            ver = info.metadata.bundleShortVersionString
-            filename = f"{bundle}-v{ver}-{info.songId}.ipa"
-            path = os.path.join(out_dir, filename)
-            log.info("  appstore: downloading %s (%s) via iTunes server ...", bundle, ver)
-            _download_file(info.URL, path)
-            _embed_sinf_and_metadata(path, info)
-            log.info("  appstore: got %.1f MB -> %s",
-                     os.path.getsize(path) / (1024 * 1024), filename)
-            return True, path, ""
-        except StoreException as e:
-            last_err = str(e.errMsg or e)
-            # Already owned -> retry as redownload; otherwise surface the error.
-            if "purchased" in last_err.lower() or "license" in last_err.lower():
-                continue
-            return False, "", last_err
-        except Exception as e:  # noqa: BLE001
-            last_err = str(e)
-            return False, "", last_err
-    return False, "", last_err or "appstore download failed"
+    def _save(resp) -> str:
+        if not resp.songList:
+            raise RuntimeError("no songList in download response")
+        info = resp.songList[0]
+        bundle = info.metadata.softwareVersionBundleId
+        ver = info.metadata.bundleShortVersionString
+        path = os.path.join(out_dir, f"{bundle}-v{ver}-{info.songId}.ipa")
+        log.info("  appstore: downloading %s (%s) via iTunes server ...", bundle, ver)
+        _download_file(info.URL, path)
+        _embed_sinf_and_metadata(path, info)
+        log.info("  appstore: got %.1f MB -> %s",
+                 os.path.getsize(path) / (1024 * 1024), os.path.basename(path))
+        return path
+
+    try:
+        if app_ver_id:
+            # Old build: must own the app first, then redownload the version.
+            lic = _ensure_license(store, app_id)
+            if lic and "already" not in lic.lower():
+                return False, "", _clean_store_error(lic)
+            resp = store.download(app_id, app_ver_id, isRedownload=True)
+            return True, _save(resp), ""
+
+        # Current build: acquire (STDQ), fall back to redownload if already owned.
+        last_err = ""
+        for is_redownload in (False, True):
+            try:
+                resp = store.download(app_id, "", isRedownload=is_redownload)
+                return True, _save(resp), ""
+            except StoreException as e:
+                last_err = str(e.errMsg or e)
+                if any(m in last_err.lower() for m in ("purchased", "license", "owned")):
+                    continue
+                return False, "", _clean_store_error(last_err)
+        return False, "", _clean_store_error(last_err or "appstore download failed")
+    except StoreException as e:
+        return False, "", _clean_store_error(str(e.errMsg or e))
+    except Exception as e:  # noqa: BLE001
+        return False, "", str(e)
