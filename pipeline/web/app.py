@@ -11,6 +11,13 @@ from fastapi.templating import Jinja2Templates
 _HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(_HERE / "templates"))
 
+# Cache-bust static assets: version = css mtime, so a changed stylesheet always
+# reloads in the browser after a server restart.
+try:
+    templates.env.globals["asset_ver"] = int((_HERE / "static" / "console.css").stat().st_mtime)
+except OSError:
+    templates.env.globals["asset_ver"] = 0
+
 _DB = None
 _JOBS = None
 
