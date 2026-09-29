@@ -120,6 +120,27 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False,
     return WorkState.UNTESTED, "", (proc.stderr or proc.stdout or "unknown error")[:300]
 
 
+def acquire_one(db: Database, bundle_id: str, country: str = "us",
+                app_id: str | None = None, from_appstore: bool = False) -> tuple[WorkState, str, str]:
+    """Download + install + decrypt ONE specific app by bundle id. Returns
+    (work_state, ipa_path, error). Records it in the DB like the corpus path."""
+    if not CONFIG.decrypt_device.is_bootstrapped:
+        return WorkState.UNTESTED, "", "ipadecrypt not bootstrapped"
+    if CONFIG.acquire_mode == "ipatool" and not _ipatool_login():
+        return WorkState.UNTESTED, "", "ipatool not authenticated"
+    app_id = app_id or bundle_id
+    row = {"app_id": app_id, "bundle_id": bundle_id, "country": country}
+    state, path, err = decrypt_one(app_id, row, from_appstore)
+    db.upsert_app(app_id, country, bundle_id=bundle_id)
+    db.save_acquisition(app_id, state, ipa_path=path, error=err)
+    if state == WorkState.POSITIVE:
+        db.set_stage(app_id, Stage.ACQUIRED)
+        log.info("acquired %s -> %s", bundle_id, path)
+    else:
+        log.warning("acquire %s: %s (%s)", bundle_id, err, state.name)
+    return state, path, err
+
+
 def run(db: Database, limit: int | None = None, from_appstore: bool = False) -> dict[str, int]:
     """Acquire all apps still needing decryption. Resumable via the work queue."""
     if not CONFIG.decrypt_device.is_bootstrapped:

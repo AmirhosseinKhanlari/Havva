@@ -35,6 +35,11 @@ def cmd_crawl(args: argparse.Namespace) -> int:
 def cmd_acquire(args: argparse.Namespace) -> int:
     from . import acquire
     db = Database(CONFIG.paths.db)
+    if args.bundle:
+        state, path, err = acquire.acquire_one(db, args.bundle, country=args.country,
+                                               app_id=args.app_id, from_appstore=args.from_appstore)
+        print(f"state={state.name} path={path or '-'} error={err or '-'}")
+        return 0 if state.name == "POSITIVE" else 1
     stats = acquire.run(db, limit=args.limit, from_appstore=args.from_appstore)
     print(stats)
     return 0
@@ -170,7 +175,10 @@ def main() -> int:
     p_crawl.set_defaults(func=cmd_crawl)
 
     p_acq = sub.add_parser("acquire", help="download + decrypt IPAs (ipadecrypt or ipatool)")
-    p_acq.add_argument("--limit", type=int, help="max apps this run")
+    p_acq.add_argument("--limit", type=int, help="max apps this run (corpus mode)")
+    p_acq.add_argument("--bundle", help="acquire ONE specific app by bundle id (e.g. com.calm.calmapp)")
+    p_acq.add_argument("--app-id", help="optional App Store numeric id for the single app")
+    p_acq.add_argument("--country", default="us", help="storefront for single-app acquire (default us)")
     p_acq.add_argument("--from-appstore", action="store_true", help="force App Store fetch")
     p_acq.set_defaults(func=cmd_acquire)
 
