@@ -221,6 +221,52 @@ def _to_int(v) -> int | None:
         return None
 
 
+ITUNES_SEARCH = "https://itunes.apple.com/search"
+
+
+def add_app(db: Database, identifier: str, country: str = "us") -> str | None:
+    """Add a single app NOT in the corpus, by numeric App Store id or bundle id.
+    Fetches full iTunes metadata, upserts it, returns the app_id (or None)."""
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    params = {"country": country.lower()}
+    params["id" if ident.isdigit() else "bundleId"] = ident
+    try:
+        r = requests.get(ITUNES_LOOKUP, params=params, timeout=30)
+        r.raise_for_status()
+        results = [x for x in r.json().get("results", []) if x.get("trackId")]
+    except (requests.RequestException, ValueError) as e:
+        log.warning("add_app lookup failed for %s: %s", ident, e)
+        return None
+    if not results:
+        return None
+    it = results[0]
+    app_id = str(it["trackId"])
+    db.upsert_app(app_id, country, **_normalize({}, it))
+    return app_id
+
+
+def search_appstore(term: str, country: str = "us", limit: int = 15) -> list[dict]:
+    """Search the App Store by name. Returns lightweight rows for the add UI."""
+    try:
+        r = requests.get(ITUNES_SEARCH, params={
+            "term": term, "country": country.lower(), "media": "software",
+            "entity": "software", "limit": limit}, timeout=30)
+        r.raise_for_status()
+        res = r.json().get("results", [])
+    except (requests.RequestException, ValueError) as e:
+        log.warning("appstore search failed for %r: %s", term, e)
+        return []
+    return [{
+        "app_id": str(x["trackId"]),
+        "name": x.get("trackName"),
+        "bundle_id": x.get("bundleId"),
+        "artwork_url": x.get("artworkUrl100") or x.get("artworkUrl60"),
+        "category": x.get("primaryGenreName"),
+    } for x in res if x.get("trackId")]
+
+
 def crawl(db: Database, countries: list[str] | None = None,
           categories: dict[str, str] | None = None,
           count: int | None = None, enrich: bool = True, source: str = "auto") -> int:

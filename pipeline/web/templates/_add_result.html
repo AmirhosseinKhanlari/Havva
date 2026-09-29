@@ -1,0 +1,22 @@
+{% if error %}
+<div class="banner hit" style="padding:12px 14px"><div class="row1"><span class="bdot" style="background:var(--bad)"></span><span style="font-size:14px;font-weight:600">{{ error }}</span></div></div>
+{% elif results is defined %}
+  {% if results %}
+  <div class="rows">
+    {% for r in results %}
+    <div class="row" style="cursor:default">
+      {% if r['artwork_url'] %}<img class="appicon" src="{{ r['artwork_url'] }}" alt="">{% else %}<div class="appicon ph" style="background:linear-gradient(150deg,#0A84FF,#5E5CE6)">{{ (r['name'] or '?')[0]|upper }}</div>{% endif %}
+      <div style="min-width:0;flex:1">
+        <div class="name">{{ r['name'] }}</div>
+        <div class="sub mono">{{ r['bundle_id'] or '' }} · {{ r['category'] or '' }}</div>
+      </div>
+      <button class="pill primary small" hx-post="/corpus/add"
+              hx-vals='{"identifier": "{{ r['app_id'] }}", "country": "{{ country }}"}'
+              hx-swap="none">Add &amp; open</button>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted" style="font-size:13px">No results.</p>
+  {% endif %}
+{% endif %}

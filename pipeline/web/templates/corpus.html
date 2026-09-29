@@ -20,6 +20,28 @@
 </label>
 {% endmacro %}
 <div class="section">
+  <details class="card" style="margin-bottom:14px">
+    <summary><span class="caret">›</span>Add an app not in the corpus</summary>
+    <div class="dbody">
+      <form hx-post="/corpus/add" hx-target="#add-result" hx-swap="innerHTML"
+            style="display:flex;flex-wrap:wrap;gap:8px;align-items:end">
+        <label style="flex:1;min-width:200px;display:flex;flex-direction:column;gap:4px">
+          <span class="muted" style="font-size:11px">App Store id or bundle id</span>
+          <input name="identifier" placeholder="e.g. 310633997 or com.whatsapp.WhatsApp" class="field">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px">
+          <span class="muted" style="font-size:11px">Country</span>
+          <input name="country" value="us" class="field" style="width:80px">
+        </label>
+        <button class="pill primary">Add &amp; open</button>
+        <button class="pill" hx-get="/corpus/search" hx-include="closest form"
+                hx-target="#add-result" hx-swap="innerHTML" formnovalidate
+                type="button">Search Store</button>
+      </form>
+      <div id="add-result" style="margin-top:10px"></div>
+    </div>
+  </details>
+
   <form id="filters" hx-get="/corpus" hx-target="#corpus-results" hx-swap="outerHTML"
         hx-trigger="submit, change, keyup changed delay:400ms from:input">
     <div class="searchbar" style="margin-bottom:12px">

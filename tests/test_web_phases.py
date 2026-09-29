@@ -114,6 +114,35 @@ def test_acquire_action_keys_by_corpus_app_id(monkeypatch):
     assert captured.get("bundle_id") is None
 
 
+def test_add_app_redirects_to_detail(monkeypatch):
+    import pipeline.crawl as crawl
+    c, _ = _client(tempfile.mkdtemp())
+    monkeypatch.setattr(crawl, "add_app", lambda db, ident, country="us": "310633997")
+    r = c.post("/corpus/add", data={"identifier": "310633997", "country": "us"},
+               headers={"HX-Request": "true"}, follow_redirects=False)
+    assert r.status_code == 204
+    assert r.headers.get("HX-Redirect") == "/app/310633997"
+
+
+def test_add_app_not_found_shows_error(monkeypatch):
+    import pipeline.crawl as crawl
+    c, _ = _client(tempfile.mkdtemp())
+    monkeypatch.setattr(crawl, "add_app", lambda db, ident, country="us": None)
+    r = c.post("/corpus/add", data={"identifier": "nope", "country": "us"},
+               headers={"HX-Request": "true"})
+    assert r.status_code == 200
+    assert "No App Store match" in r.text
+
+
+def test_appstore_search_lists_results(monkeypatch):
+    import pipeline.crawl as crawl
+    c, _ = _client(tempfile.mkdtemp())
+    monkeypatch.setattr(crawl, "search_appstore", lambda term, country="us", limit=15: [
+        {"app_id": "1", "name": "Foo", "bundle_id": "com.foo", "artwork_url": "", "category": "Utilities"}])
+    r = c.get("/corpus/search", params={"identifier": "foo"}, headers={"HX-Request": "true"})
+    assert r.status_code == 200 and "Foo" in r.text and "com.foo" in r.text
+
+
 def test_settings_page_and_doctor():
     c, _ = _client(tempfile.mkdtemp())
     assert c.get("/settings").status_code == 200
