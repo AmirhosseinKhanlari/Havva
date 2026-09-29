@@ -73,7 +73,8 @@ h1.title{margin:0;font-size:34px;font-weight:700;letter-spacing:-.03em;line-heig
 .tiles > .glass.sm > div{min-width:0;overflow-wrap:anywhere;word-break:break-word}
 
 /* buttons */
-.pill{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;font-size:13.5px;font-weight:600;border-radius:12px;cursor:pointer;transition:transform .12s ease,filter .12s ease;color:var(--accent);background:var(--field);border:1px solid var(--field-brd)}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;font-size:13.5px;font-weight:600;border-radius:12px;cursor:pointer;transition:transform .12s ease,filter .12s ease;color:var(--accent);background:var(--field);border:1px solid var(--field-brd);text-decoration:none}
+a.pill,a.get-btn{text-decoration:none}
 .pill:hover{filter:brightness(1.15)} .pill:active{transform:scale(.96)}
 .pill.primary{color:#fff;background:linear-gradient(150deg,var(--accent),var(--accent2));border:none;box-shadow:0 8px 20px -8px var(--accent)}
 .pill.small{padding:7px 13px;font-size:12.5px;border-radius:11px}
@@ -169,4 +170,5 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',ui
 .hitem{display:flex;align-items:center;gap:11px}
 .hitem .hdot{position:relative;width:9px;height:9px;border-radius:50%}
 .hitem .hdot i{position:absolute;inset:-4px;border-radius:50%;opacity:.35;animation:pulse 2.4s ease-in-out infinite}
-a{color:var(--accent)}
+a{color:var(--accent);text-decoration:none}
+a.link,a.underline{text-decoration:underline}

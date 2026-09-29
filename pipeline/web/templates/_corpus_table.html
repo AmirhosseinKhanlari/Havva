@@ -29,9 +29,10 @@
     </a>
     {% endfor %}
   </div>
-  <div style="display:flex;justify-content:space-between;margin-top:16px;font-size:14px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:10px">
     {% set base = '/corpus?' ~ qs %}
-    {% if page > 1 %}<a href="{{ base }}&page={{ page-1 }}">‹ prev</a>{% else %}<span></span>{% endif %}
-    {% if page < pages %}<a href="{{ base }}&page={{ page+1 }}">next ›</a>{% endif %}
+    {% if page > 1 %}<a class="pill small" href="{{ base }}&page={{ page-1 }}">‹ Prev</a>{% else %}<span></span>{% endif %}
+    <span class="muted" style="font-size:12px">Page {{ page }} / {{ pages }}</span>
+    {% if page < pages %}<a class="pill small" href="{{ base }}&page={{ page+1 }}">Next ›</a>{% else %}<span></span>{% endif %}
   </div>
 </div>
