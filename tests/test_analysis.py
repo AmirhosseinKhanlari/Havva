@@ -23,6 +23,7 @@ def _make_ipa(path: Path) -> None:
     fake_bin = (b"garbage\x00\xf9\xfe"  # non-utf8 bytes to exercise binary-safe strings
                 b"https://api.example.com/v1/login "
                 b"AKIAABCDEFGHIJKLMNOP "
+                b"_strcpy _memcpy CC_MD5 UIWebView "  # insecure-API rule hits
                 b"SecTrustEvaluate DCAppAttestService TrustKit\x00")
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("Payload/Test.app/Info.plist", plistlib.dumps(info))
@@ -58,6 +59,27 @@ def test_analyze_ipa_extracts_all_sections():
     assert any("api.example.com" in u for u in r["secrets"]["urls"])
 
     assert len(r["file_tree"]) >= 4
+
+    # new deep-scan sections (gaps closed vs MobSF)
+    assert "binary_protections" in r and isinstance(r["binary_protections"], dict)
+    # insecure-C + weak-hash + webview tokens are in the fake binary
+    cats = {f["category"] for f in r["insecure_apis"]}
+    assert "Insecure C functions" in cats
+    assert "Weak hashing (MD5/SHA1)" in cats
+    assert r["security_score"]["grade"] in ("A", "B", "C", "D", "F")
+    assert 0 <= r["security_score"]["score"] <= 100
+
+
+def test_email_filtering_drops_noise():
+    from pipeline.analysis import emails_domains
+    blob = (b"contact@real.com support@company.io logo@2x.png %@.svc.com "
+            b"api.myservice.net cdn.test.org")
+    ed = emails_domains(blob)
+    assert "contact@real.com" in ed["emails"]
+    assert "support@company.io" in ed["emails"]
+    assert not any("2x.png" in e for e in ed["emails"])
+    assert not any("%" in e for e in ed["emails"])
+    assert "api.myservice.net" in ed["domains"]
 
 
 def test_analyze_one_persists_to_db():

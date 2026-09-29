@@ -158,6 +158,10 @@ CREATE TABLE IF NOT EXISTS analysis (
     secrets TEXT,                        -- JSON
     file_tree TEXT,                      -- JSON
     crypto_hints TEXT,                   -- JSON
+    binary_protections TEXT,             -- JSON (checksec: pie/nx/canary/arc/rpath/signature/encrypted)
+    insecure_apis TEXT,                  -- JSON (banned APIs, weak crypto/hash, random, webview)
+    binary_type TEXT,                    -- Swift | Objective-C | unknown
+    security_score TEXT,                 -- JSON {score, grade, deductions}
     analyzed_at TEXT
 );
 
@@ -193,6 +197,10 @@ class Database:
     def migrate(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+        # additive columns for existing DBs (analysis deep-scan fields)
+        for col, decl in (("binary_protections", "TEXT"), ("insecure_apis", "TEXT"),
+                          ("binary_type", "TEXT"), ("security_score", "TEXT")):
+            self.add_column_if_missing("analysis", col, decl)
 
     def add_column_if_missing(self, table: str, column: str, decl: str) -> None:
         """The paper-1 `ensure_rc_columns` idiom: additive migration."""
@@ -538,7 +546,8 @@ class Database:
 
     def save_analysis(self, app_id: str, data: dict) -> None:
         cols = ("info_plist", "entitlements", "ats", "frameworks", "sdks",
-                "secrets", "file_tree", "crypto_hints")
+                "secrets", "file_tree", "crypto_hints", "binary_protections",
+                "insecure_apis", "binary_type", "security_score")
         vals = [json.dumps(data.get(c)) for c in cols]
         with self.connect() as conn:
             conn.execute(

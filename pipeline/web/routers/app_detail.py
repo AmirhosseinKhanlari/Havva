@@ -48,7 +48,8 @@ def _decode_analysis(row) -> dict:
     import json
     out = {}
     for k in ("info_plist", "entitlements", "ats", "frameworks", "sdks",
-              "secrets", "file_tree", "crypto_hints"):
+              "secrets", "file_tree", "crypto_hints", "binary_protections",
+              "insecure_apis", "binary_type", "security_score"):
         try:
             out[k] = json.loads(row[k]) if row[k] else None
         except Exception:

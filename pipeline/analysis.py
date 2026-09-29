@@ -45,6 +45,28 @@ _CRYPTO_SYMS = ("SecItemAdd", "SecItemCopyMatching", "SecTrustEvaluate",
                 "CC_SHA256", "SecKeyCreateSignature", "DCAppAttestService",
                 "DCDevice", "LAContext", "SecRandomCopyBytes")
 
+# Insecure / interesting binary API rules (mirrors MobSF ipa_rules.py). Each entry:
+# (category, severity, [byte tokens to look for in the strings/symbols blob]).
+_API_RULES = [
+    ("Insecure C functions", "high",
+     [b"_strcpy", b"_strcat", b"_strncpy", b"_strncat", b"_sprintf", b"_vsprintf",
+      b"_gets", b"_memcpy", b"_sscanf", b"_stpcpy"]),
+    ("Weak hashing (MD5/SHA1)", "medium",
+     [b"CC_MD5", b"CC_MD4", b"CC_SHA1", b"MD5_Init", b"MD5_Update", b"MD5_Final",
+      b"SHA1_Init", b"SHA1_Update"]),
+    ("Weak crypto (DES/3DES/RC4/RC2/ECB)", "high",
+     [b"kCCAlgorithmDES", b"kCCAlgorithm3DES", b"kCCAlgorithmRC4",
+      b"kCCAlgorithmRC2", b"kCCOptionECBMode"]),
+    ("Insecure random", "medium", [b"_srand", b"_random\n", b"_rand\n"]),
+    ("Malloc usage", "info", [b"_malloc\n"]),
+    ("NSLog logging", "info", [b"_NSLog"]),
+    ("ptrace anti-debug (non-public API)", "medium", [b"_ptrace"]),
+    ("UIWebView (deprecated/insecure)", "medium", [b"UIWebView"]),
+]
+
+_EMAIL_RE = re.compile(rb"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_DOMAIN_RE = re.compile(rb"\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b")
+
 # Secret/endpoint patterns: (label, regex, severity).
 _SECRET_PATTERNS = [
     ("AWS access key", re.compile(rb"AKIA[0-9A-Z]{16}"), "high"),
@@ -161,6 +183,135 @@ def scan_secrets(strings_blob: bytes) -> dict:
     return {"findings": findings, "urls": urls}
 
 
+def _nm(bin_path: Path) -> bytes:
+    try:
+        p = subprocess.run(["nm", str(bin_path)], capture_output=True, timeout=90)
+        return (p.stdout or b"") + (p.stderr or b"")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return b""
+
+
+def checksec(bin_path: Path | None) -> dict:
+    """Mach-O binary hardening report (PIE, NX, stack canary, ARC, RPATH, code
+    signature, encryption, symbols) using otool + nm. All best-effort."""
+    out = {"pie": None, "nx": None, "stack_canary": None, "arc": None,
+           "rpath": None, "code_signature": None, "encrypted": None,
+           "symbols_stripped": None}
+    if not bin_path or not bin_path.exists():
+        return out
+    try:
+        flags = subprocess.run(["otool", "-hv", str(bin_path)],
+                               capture_output=True, text=True, timeout=60).stdout
+        out["pie"] = "PIE" in flags
+        out["nx"] = "ALLOW_STACK_EXECUTION" not in flags
+    except Exception:
+        pass
+    try:
+        lc = subprocess.run(["otool", "-l", str(bin_path)],
+                            capture_output=True, text=True, timeout=90).stdout
+        out["rpath"] = "LC_RPATH" in lc
+        out["code_signature"] = "LC_CODE_SIGNATURE" in lc
+        if "LC_ENCRYPTION_INFO" in lc:
+            # cryptid 1 => still encrypted; 0 => decrypted
+            import re as _re
+            m = _re.search(r"cryptid (\d+)", lc)
+            out["encrypted"] = bool(m and m.group(1) != "0")
+        else:
+            out["encrypted"] = False
+    except Exception:
+        pass
+    syms = _nm(bin_path)
+    if syms:
+        out["stack_canary"] = (b"___stack_chk_fail" in syms or b"__stack_chk_guard" in syms
+                               or b"_stack_chk_fail" in syms)
+        out["arc"] = (b"_objc_release" in syms or b"_objc_autoreleaseReturnValue" in syms
+                      or b"_objc_storeStrong" in syms)
+        # A binary with debug/local symbols (lowercase 't'/'d'/'b' entries) is not stripped.
+        out["symbols_stripped"] = not any(f" {c} " in syms.decode("utf-8", "replace")
+                                          for c in ("t", "d", "b"))
+    return out
+
+
+def binary_type(fw: dict, strings_blob: bytes) -> str:
+    linked = " ".join(fw.get("linked", []) + fw.get("embedded", []))
+    if "libswiftCore" in linked or b"_swift_release" in strings_blob or b"swift_getObjectType" in strings_blob:
+        return "Swift"
+    if b"_objc_msgSend" in strings_blob:
+        return "Objective-C"
+    return "unknown"
+
+
+def insecure_apis(strings_blob: bytes) -> list[dict]:
+    findings = []
+    for category, sev, tokens in _API_RULES:
+        hits = sorted({t.strip(b"\n").decode("utf-8", "replace")
+                       for t in tokens if t in strings_blob})
+        if hits:
+            findings.append({"category": category, "severity": sev, "matches": hits})
+    return findings
+
+
+_FILE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".pdf", ".json", ".plist", ".html",
+             ".css", ".js", ".webp", ".svg", ".mp3", ".mp4", ".ttf", ".otf", ".car")
+
+
+def _looks_like_email(e: str) -> bool:
+    if "%" in e or " " in e:                    # format-string / concatenation artifacts
+        return False
+    if e.lower().endswith(_FILE_EXT):           # e.g. logo@2x.png
+        return False
+    dom = e.rsplit("@", 1)[-1].lower()
+    return "." in dom and dom.rsplit(".", 1)[-1].isalpha()
+
+
+def emails_domains(strings_blob: bytes) -> dict:
+    emails = sorted({m.decode("utf-8", "replace") for m in _EMAIL_RE.findall(strings_blob)
+                     if _looks_like_email(m.decode("utf-8", "replace"))})[:60]
+    doms = {m.decode("utf-8", "replace").lower() for m in _DOMAIN_RE.findall(strings_blob)}
+    noise = ("apple.com", "mzstatic.com", "w3.org", "example.com", "schemas.android.com")
+    domains = sorted(d for d in doms if not any(n in d for n in noise)
+                     and not d.endswith(_FILE_EXT) and "." in d and len(d) < 60)[:120]
+    return {"emails": emails, "domains": domains}
+
+
+def security_score(report: dict) -> dict:
+    """Roll findings into a 0-100 score + letter grade with itemized deductions."""
+    score = 100
+    items = []
+
+    def cut(points, reason):
+        nonlocal score
+        score -= points
+        items.append({"points": -points, "reason": reason})
+
+    cs = report.get("binary_protections") or {}
+    if cs.get("pie") is False:
+        cut(10, "No PIE (position-independent executable)")
+    if cs.get("stack_canary") is False:
+        cut(10, "No stack canary")
+    if cs.get("arc") is False:
+        cut(5, "No ARC")
+    if cs.get("code_signature") is False:
+        cut(10, "No code signature")
+    if cs.get("rpath") is True:
+        cut(5, "Uses runpath search path (RPATH)")
+
+    for f in report.get("insecure_apis") or []:
+        pts = {"high": 12, "medium": 6, "info": 0}.get(f["severity"], 3)
+        if pts:
+            cut(pts, f"{f['category']}")
+
+    highs = sum(1 for s in (report.get("secrets") or {}).get("findings", [])
+                if s.get("severity") == "high")
+    if highs:
+        cut(min(30, highs * 15), f"{highs} high-severity secret finding(s)")
+
+    score = max(0, min(100, score))
+    grade = ("A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60
+             else "D" if score >= 40 else "F")
+    return {"score": score, "grade": grade, "deductions": items}
+
+
 def entitlements(bin_path: Path | None) -> dict:
     if not bin_path or not bin_path.exists():
         return {}
@@ -199,7 +350,9 @@ def analyze_ipa(ipa_path: str) -> dict:
     """Full deep-analysis report for one decrypted IPA. Best-effort per section."""
     result: dict = {"info_plist": {}, "entitlements": {}, "ats": {},
                     "frameworks": {}, "sdks": [], "secrets": {},
-                    "file_tree": [], "crypto_hints": []}
+                    "file_tree": [], "crypto_hints": [],
+                    "binary_protections": {}, "insecure_apis": [],
+                    "binary_type": "unknown", "security_score": {}}
     tmp = Path(tempfile.mkdtemp(prefix="satella-analysis-"))
     try:
         with zipfile.ZipFile(ipa_path) as zf:
@@ -225,6 +378,12 @@ def analyze_ipa(ipa_path: str) -> dict:
             blob = _strings_of(bin_path)
             result["crypto_hints"] = crypto_hints(blob)
             result["secrets"] = scan_secrets(blob)
+            # emails + domains live alongside URLs in the secrets section
+            result["secrets"].update(_safe(emails_domains, blob))
+            result["binary_protections"] = _safe(checksec, bin_path)
+            result["insecure_apis"] = _safe(insecure_apis, blob)
+            result["binary_type"] = binary_type(result["frameworks"], blob)
+            result["security_score"] = security_score(result)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return result
@@ -235,7 +394,7 @@ def _safe(fn, *args):
         return fn(*args)
     except Exception as e:  # noqa: BLE001
         log.warning("analysis extractor %s failed: %s", getattr(fn, "__name__", fn), e)
-        return {} if fn not in (file_tree,) else []
+        return [] if fn in (file_tree, insecure_apis) else {}
 
 
 def analyze_one(db: Database, app_id: str, log_fn=None) -> dict:

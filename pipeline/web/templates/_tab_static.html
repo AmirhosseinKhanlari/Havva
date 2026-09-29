@@ -35,6 +35,44 @@
 </div>
 
 {% if analysis %}{% set a = analysis %}
+{% set score = a['security_score'] or {} %}
+{% if score.get('score') is not none %}
+{% set gcol = 'var(--ok)' if score['grade'] in ('A','B') else 'var(--warn)' if score['grade'] in ('C','D') else 'var(--bad)' %}
+<div class="glass sm" style="padding:16px 18px;margin-bottom:12px;display:flex;align-items:center;gap:16px">
+  <div style="width:56px;height:56px;border-radius:14px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:800;color:#fff;background:linear-gradient(150deg,{{ gcol }},{{ gcol }})">{{ score['grade'] }}</div>
+  <div style="flex:1">
+    <div style="font-size:18px;font-weight:700">Security score: {{ score['score'] }}/100</div>
+    <div class="muted" style="font-size:12px">Binary type: {{ a['binary_type'] }} · {{ (score['deductions'] or [])|length }} issue(s)</div>
+  </div>
+</div>
+{% endif %}
+
+{% if a['binary_protections'] %}{% set cs = a['binary_protections'] %}
+<details class="card" style="margin-bottom:12px" open><summary><span class="caret">›</span>Binary protections</summary>
+  <div class="dbody"><section class="tiles">
+    {% for label, key, good in [('PIE','pie',true),('NX','nx',true),('Stack canary','stack_canary',true),('ARC','arc',true),('Code signature','code_signature',true),('Encrypted','encrypted',false),('RPATH','rpath',false),('Symbols stripped','symbols_stripped',true)] %}
+    {% set v = cs.get(key) %}
+    {% set ok = (v == good) %}
+    <div class="glass sm" style="padding:12px 14px"><div class="muted" style="font-size:11.5px;margin-bottom:4px">{{ label }}</div>
+      <div style="font-size:14px;font-weight:700;color:{% if v is none %}var(--ink3){% elif ok %}var(--ok){% else %}var(--bad){% endif %}">{{ 'n/a' if v is none else ('yes' if v else 'no') }}</div></div>
+    {% endfor %}
+  </section></div>
+</details>
+{% endif %}
+
+{% if a['insecure_apis'] %}
+<details class="card" style="margin-bottom:12px"><summary><span class="caret">›</span>Insecure API findings <span class="muted" style="font-weight:500">({{ a['insecure_apis']|length }})</span></summary>
+  <div class="dbody hlist" style="gap:8px">
+    {% for f in a['insecure_apis'] %}
+    <div style="font-size:12.5px">
+      <span class="state {{ 'failed' if f['severity']=='high' else 'running' if f['severity']=='medium' else 'queued' }}">{{ f['severity'] }}</span>
+      <b>{{ f['category'] }}</b> — <span class="mono">{{ f['matches']|join(', ') }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
 <div class="hlist">
   {% if a['info_plist'] %}<details class="card" open><summary><span class="caret">›</span>Info.plist + permissions</summary>
     <div class="dbody">
@@ -50,6 +88,10 @@
       {% for f in (a['secrets'].get('findings') or []) %}<div style="font-size:12.5px;margin-bottom:6px"><span class="state {{ 'failed' if f['severity']=='high' else 'running' if f['severity']=='medium' else 'queued' }}">{{ f['severity'] }}</span> {{ f['type'] }}: <span class="mono">{{ f['value'] }}</span></div>{% endfor %}
       <div class="muted" style="font-size:11.5px;margin:6px 0 4px">URLs</div>
       {% for u in (a['secrets'].get('urls') or [])[:40] %}<div class="mono ink2" style="font-size:12px">{{ u }}</div>{% endfor %}
+      {% if a['secrets'].get('emails') %}<div class="muted" style="font-size:11.5px;margin:6px 0 4px">Emails</div>
+      {% for e in a['secrets'].get('emails') %}<div class="mono ink2" style="font-size:12px">{{ e }}</div>{% endfor %}{% endif %}
+      {% if a['secrets'].get('domains') %}<div class="muted" style="font-size:11.5px;margin:6px 0 4px">Domains ({{ a['secrets'].get('domains')|length }})</div>
+      {% for d in (a['secrets'].get('domains') or [])[:60] %}<div class="mono ink2" style="font-size:12px">{{ d }}</div>{% endfor %}{% endif %}
     </div></details>{% endif %}
   {% if a['file_tree'] %}<details class="card"><summary><span class="caret">›</span>File tree <span class="muted" style="font-weight:500">({{ a['file_tree']|length }})</span></summary>
     <div class="dbody" style="max-height:280px;overflow:auto">{% for f in a['file_tree'][:200] %}<div class="mono ink2" style="font-size:11.5px;white-space:nowrap"><span class="muted" style="display:inline-block;width:74px">{{ (f['size']/1024)|round(1) }} KB</span>{{ f['path'] }}</div>{% endfor %}</div></details>{% endif %}
