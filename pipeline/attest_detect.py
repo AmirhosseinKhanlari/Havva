@@ -1,43 +1,68 @@
-"""Dynamic App Attest usage detection.
+"""Dynamic App Attest usage detection via library injection (no jailbreak, no Frida).
 
-Confirms whether an app actually *invokes* App Attest at runtime (the strongest
-usage signal, stronger than a static symbol), and identifies the endpoint that
-carries the attestation object. Produces a confidence level combining static and
-dynamic signals:
+Injects AttestObserver.dylib (ObjC swizzling) into the re-signed app; the dylib
+logs a staged marker trail (OBSERVER_LOADED -> CLASS_PRESENT/ABSENT ->
+HOOK_VERIFIED -> CALL) to the device syslog, which we read over USB with
+idevicesyslog. The trail distinguishes tooling failure from a real negative.
 
-  entitlement present            -> CAPABLE          (weak)
-  symbols/framework linked       -> LIKELY           (medium)
-  runtime API call observed      -> CONFIRMED_ACTIVE (high)
-  observed + endpoint located    -> CONFIRMED_LOCATED (highest)
-
-Read-only probe (scripts/attest_observe.js logs, changes nothing). Runs under the
-Frida-gadget config. Negative results are coverage-bounded (not observing a call
-does not prove non-use), so we never downgrade a static signal on a miss.
+Confidence ladder (static + dynamic; dynamic never downgrades a static signal):
+  entitlement -> CAPABLE ; symbols -> LIKELY ; runtime CALL -> CONFIRMED_ACTIVE ;
+  CALL + attested endpoint located -> CONFIRMED_LOCATED.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 
 from . import capture, device, instrument
 from .config import CONFIG
 from .db import Database
-from .models import AttestConfidence, BypassStage, Stage
-from .util import get_logger, run_cmd
+from .models import AttestConfidence, Stage
+from .util import get_logger
 
 log = get_logger("attest_detect", CONFIG.paths.log_dir)
 
-OBSERVE_SCRIPT = CONFIG.paths.root / "scripts" / "attest_observe.js"
 _ASSERT_HEADER_RE = re.compile(r"assert|attest|integrity|device-?check|app-?check|x-.*token",
                                re.IGNORECASE)
-_CALL_RE = re.compile(r"ATTEST_OBSERVE CALL (\S+) (\S+)")
+_CALL_RE = re.compile(r"CALL (\S+) (\S+)")
+_VERIFIED_RE = re.compile(r"HOOK_VERIFIED (\S+)")
+_FAILED_RE = re.compile(r"HOOK_FAILED (\S+)")
+
+
+@dataclass
+class Trail:
+    """Parsed AttestObserver marker trail from the device syslog."""
+    loaded: bool = False
+    class_present: bool = False
+    class_absent: bool = False
+    verified: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    calls: list[str] = field(default_factory=list)
+
+    @property
+    def tooling_ok(self) -> bool:
+        # The detector worked if it loaded and either armed a hook or proved the
+        # class is absent (a real, confident negative).
+        return self.loaded and (bool(self.verified) or self.class_absent)
+
+
+def parse_trail(syslog_text: str) -> Trail:
+    t = Trail()
+    txt = syslog_text or ""
+    t.loaded = "OBSERVER_LOADED" in txt
+    t.class_present = "CLASS_PRESENT" in txt
+    t.class_absent = "CLASS_ABSENT" in txt
+    t.verified = sorted(set(_VERIFIED_RE.findall(txt)))
+    t.failed = sorted(set(_FAILED_RE.findall(txt)))
+    t.calls = sorted({f"{c} {s}" for c, s in _CALL_RE.findall(txt)})
+    return t
 
 
 def classify_confidence(entitlement: bool, symbols: bool,
                         methods_seen: list[str], endpoint_found: bool) -> AttestConfidence:
-    """Pure confidence ladder. A dynamic observation never lowers a static signal;
-    it only raises confidence."""
+    """Pure confidence ladder. A dynamic observation only raises confidence."""
     if methods_seen and endpoint_found:
         return AttestConfidence.CONFIRMED_LOCATED
     if methods_seen:
@@ -49,13 +74,7 @@ def classify_confidence(entitlement: bool, symbols: bool,
     return AttestConfidence.NONE
 
 
-def _methods_from_output(frida_output: str) -> list[str]:
-    return sorted({f"{c} {s}" for c, s in _CALL_RE.findall(frida_output or "")})
-
-
 def _endpoint_found(flows: list) -> str:
-    """Return the first non-excluded host whose request carries an assertion-like
-    header (the attested endpoint), else empty."""
     for f in flows:
         if f.host and not capture.is_excluded(f.host):
             if any(_ASSERT_HEADER_RE.search(h) for h in f.request_headers):
@@ -64,35 +83,33 @@ def _endpoint_found(flows: list) -> str:
 
 
 def observe(app_id: str, bundle_id: str, decrypted: str,
-            creds: dict | None) -> tuple[list[str], str]:
-    """Run the app with the observe probe; return (methods_seen, attested_endpoint)."""
-    ok, signed, err = instrument.build(app_id, decrypted, BypassStage.FRIDA.value)
+            creds: dict | None) -> tuple[Trail, str]:
+    """Inject the observer, run the app while streaming syslog, parse the trail."""
+    ok, signed, err = instrument.build(app_id, decrypted, "attest_observe")
     if not ok:
         log.warning("%s observe build failed: %s", app_id, err)
-        return [], ""
+        return Trail(), ""
     installed, ierr = device.install_ipa(signed)
     if not installed:
         log.warning("%s observe install failed: %s", app_id, ierr)
-        return [], ""
+        return Trail(), ""
 
     capture.check_connection()
     capture.clear_session()
 
     driver = device.AppiumDriver(credentials=creds or {})
-    driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=bool(creds))
-    # Load the observe script into the running gadget and capture its stdout.
-    proc = run_cmd(["frida", "-U", "-n", "Gadget", "-l", str(OBSERVE_SCRIPT), "-q"], timeout=40)
-    # Exercise again so attestation-bearing requests fire while hooked.
-    driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=False)
+
+    def during():
+        driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=bool(creds))
+
+    syslog = device.capture_syslog(during=during, grep="OBSERVER")
 
     har = CONFIG.paths.results_dir / f"{app_id}_attest_observe.har"
     capture.export_har(har)
     flows = capture.har_to_flows(capture.load_har(har), CONFIG.test_device.client_ip)
     device.uninstall(bundle_id)
 
-    methods = _methods_from_output(proc.stdout + "\n" + proc.stderr)
-    endpoint = _endpoint_found(flows)
-    return methods, endpoint
+    return parse_trail(syslog), _endpoint_found(flows)
 
 
 def process_app(db: Database, row, accounts: dict) -> AttestConfidence:
@@ -110,27 +127,33 @@ def process_app(db: Database, row, accounts: dict) -> AttestConfidence:
             entitlement = False
     decrypted = ac["ipa_path"] if ac else ""
 
-    methods, endpoint = ([], "")
+    trail, endpoint = (Trail(), "")
     if decrypted:
-        methods, endpoint = observe(app_id, bundle_id, decrypted,
-                                    accounts.get(app_id) or accounts.get(bundle_id or ""))
+        trail, endpoint = observe(app_id, bundle_id, decrypted,
+                                  accounts.get(app_id) or accounts.get(bundle_id or ""))
 
-    conf = classify_confidence(entitlement, symbols, methods, bool(endpoint))
-    _save(db, app_id, conf, methods, endpoint)
-    log.info("%s attest usage -> %s (methods=%s endpoint=%s)", app_id, conf.value,
-             methods, endpoint or "-")
+    conf = classify_confidence(entitlement, symbols, trail.calls, bool(endpoint))
+    _save(db, app_id, conf, trail, endpoint)
+    status = "ok" if trail.tooling_ok else "TOOLING-UNCONFIRMED"
+    log.info("%s attest usage -> %s [%s] calls=%s endpoint=%s",
+             app_id, conf.value, status, trail.calls, endpoint or "-")
     return conf
 
 
-def _save(db: Database, app_id: str, conf: AttestConfidence,
-          methods: list[str], endpoint: str) -> None:
-    db.add_column_if_missing("static_profile", "attest_confidence", "TEXT")
-    db.add_column_if_missing("static_profile", "attest_methods_seen", "TEXT")
-    db.add_column_if_missing("static_profile", "attested_endpoint", "TEXT")
+def _save(db: Database, app_id: str, conf: AttestConfidence, trail: Trail, endpoint: str) -> None:
+    for col in ("attest_confidence TEXT", "attest_methods_seen TEXT",
+                "attested_endpoint TEXT", "attest_tooling_ok INTEGER DEFAULT 0",
+                "attest_trail TEXT"):
+        name, decl = col.split(" ", 1)
+        db.add_column_if_missing("static_profile", name, decl)
+    trail_json = json.dumps({"loaded": trail.loaded, "class_present": trail.class_present,
+                             "class_absent": trail.class_absent, "verified": trail.verified,
+                             "failed": trail.failed, "calls": trail.calls})
     with db.connect() as c:
         c.execute("UPDATE static_profile SET attest_confidence=?, attest_methods_seen=?, "
-                  "attested_endpoint=? WHERE app_id=?",
-                  (conf.value, json.dumps(methods), endpoint, app_id))
+                  "attested_endpoint=?, attest_tooling_ok=?, attest_trail=? WHERE app_id=?",
+                  (conf.value, json.dumps(trail.calls), endpoint,
+                   int(trail.tooling_ok), trail_json, app_id))
 
 
 def run(db: Database, limit: int | None = None) -> dict[str, int]:
@@ -140,7 +163,6 @@ def run(db: Database, limit: int | None = None) -> dict[str, int]:
         return {}
     from .attestation import load_accounts
     accounts = load_accounts()
-    # Candidates: apps with any static attestation signal (confirm + locate them).
     with db.connect() as c:
         rows = c.execute("SELECT a.* FROM apps a JOIN static_profile s ON s.app_id=a.app_id "
                          "WHERE s.appattest_flag=1").fetchall()

@@ -64,6 +64,11 @@ def config_specs(config: str) -> list[DylibSpec]:
         return [DylibSpec(d.ssks, d.ssks_alias, "weak"),
                 DylibSpec("EvasionKit.dylib", "libSystemBridge.dylib", "weak"),
                 sideloadfix]
+    if config == "attest_observe":
+        # See traffic (pinning bypassed) + observe App Attest API calls.
+        return [DylibSpec(d.ssks, d.ssks_alias, "weak"),
+                DylibSpec("AttestObserver.dylib", "AttestObserver.dylib", "weak"),
+                sideloadfix]
     raise ValueError(f"unknown config: {config}")
 
 

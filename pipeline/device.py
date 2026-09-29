@@ -70,6 +70,40 @@ def terminate(pid: int, bundle_id: str = "") -> None:
                  "--device", _udid(), "--pid", str(pid)], timeout=60)
 
 
+def capture_syslog(seconds: int | None = None, during=None, grep: str = "OBSERVER") -> str:
+    """Stream the device syslog over USB (no jailbreak) while either sleeping
+    `seconds` or running the `during` callable, returning lines matching `grep`.
+    Used to read the AttestObserver marker trail while the app is exercised."""
+    import subprocess
+    import time as _t
+    out = CONFIG.paths.work_dir / "syslog.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as f:
+        try:
+            p = subprocess.Popen(["idevicesyslog", "-u", _udid()], stdout=f,
+                                 stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            log.error("idevicesyslog not found (install libimobiledevice)")
+            return ""
+        _t.sleep(1)  # let the stream attach before the app runs
+        try:
+            if during is not None:
+                during()
+            else:
+                _t.sleep(seconds or CONFIG.runtime.monitor_seconds)
+        finally:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                p.kill()
+    try:
+        lines = out.read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(l for l in lines if grep in l)
+
+
 def fetch_crash_report(bundle_id: str) -> str:
     """Copy crash reports off the device and return any matching this bundle."""
     dest = CONFIG.paths.work_dir / "crash"
