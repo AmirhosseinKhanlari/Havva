@@ -213,6 +213,35 @@ def act_classify(app_id: str, request: Request, _: None = Depends(require_auth))
     return _watch(request, app_id, jid, "static")
 
 
+@router.post("/app/{app_id}/remove")
+def act_remove(app_id: str, request: Request, file: str = Form(...),
+               _: None = Depends(require_auth)):
+    """Delete one decrypted IPA for this app, then re-render the Acquire tab."""
+    from ...config import CONFIG
+    from ...models import WorkState
+    base = os.path.basename(file)
+    if base != f"{app_id}.decrypted.ipa" and not base.startswith(f"{app_id}-v"):
+        raise HTTPException(status_code=400, detail="bad file")
+    path = os.path.join(str(CONFIG.paths.ipa_dir), base)
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"could not remove: {e}")
+    # Keep the acquisition row consistent with what's left on disk.
+    db = get_db()
+    remaining = _decrypted_files(app_id)
+    ac = db.get_acquisition(app_id)
+    if ac and os.path.basename(ac["ipa_path"] or "") == base:
+        if remaining:
+            db.save_acquisition(app_id, WorkState.POSITIVE,
+                                ipa_path=os.path.join(str(CONFIG.paths.ipa_dir), remaining[0]["name"]))
+        else:
+            db.delete_acquisition(app_id)
+    return templates.TemplateResponse(request, "_tab_acquire.html",
+                                      _tab_context(request, app_id, "acquire"))
+
+
 @router.post("/app/{app_id}/analyze")
 def act_analyze(app_id: str, request: Request, _: None = Depends(require_auth)):
     _app_or_404(app_id)

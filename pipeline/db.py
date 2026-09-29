@@ -312,6 +312,12 @@ class Database:
                 (app_id, int(state), ipa_path, arch, error, _now()),
             )
 
+    def delete_acquisition(self, app_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM acquisition WHERE app_id=?", (app_id,))
+            conn.execute("UPDATE apps SET stage='crawled' WHERE app_id=? AND stage='acquired'",
+                         (app_id,))
+
     # ---- Stage C: static profile ---------------------------------------
 
     def save_static_profile(self, app_id: str, p: DefenseProfile) -> None:

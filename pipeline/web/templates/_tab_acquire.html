@@ -10,6 +10,9 @@
             <div class="mono muted" style="font-size:11.5px">{{ f['name'] }} · {{ f['size_mb'] }} MB</div>
           </div>
           <a class="get-btn" href="/app/{{ app_id }}/download?file={{ f['name'] }}">Download</a>
+          <button class="get-btn" style="color:var(--bad)" hx-post="/app/{{ app_id }}/remove"
+                  hx-vals='{"file": "{{ f['name'] }}"}' hx-target="#tab-content" hx-swap="innerHTML"
+                  hx-confirm="Delete {{ f['name'] }}?">Remove</button>
         </div>
         {% endfor %}
       </div>
