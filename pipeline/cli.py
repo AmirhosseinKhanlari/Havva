@@ -61,6 +61,13 @@ def cmd_attest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_attest_detect(args: argparse.Namespace) -> int:
+    from . import attest_detect
+    db = Database(CONFIG.paths.db)
+    print(attest_detect.run(db, limit=args.limit))
+    return 0
+
+
 def cmd_aggregate(_args: argparse.Namespace) -> int:
     from . import aggregate
     db = Database(CONFIG.paths.db)
@@ -178,6 +185,10 @@ def main() -> int:
     p_att = sub.add_parser("attest", help="attestation-enforcement differential test")
     p_att.add_argument("--limit", type=int, help="max apps this run")
     p_att.set_defaults(func=cmd_attest)
+
+    p_ad = sub.add_parser("attest-detect", help="dynamically confirm App Attest usage + endpoint")
+    p_ad.add_argument("--limit", type=int, help="max apps this run")
+    p_ad.set_defaults(func=cmd_attest_detect)
 
     sub.add_parser("aggregate", help="compute metrics + write summary").set_defaults(func=cmd_aggregate)
     p_iap = sub.add_parser("iap", help="detect in-app purchases via App Store pages")

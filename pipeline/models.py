@@ -79,6 +79,15 @@ class TlsStack(str, Enum):
     UNKNOWN = "unknown"
 
 
+class AttestConfidence(str, Enum):
+    """How confidently we know an app uses App Attest (static + dynamic ladder)."""
+    NONE = "none"                     # no signal
+    CAPABLE = "capable"              # entitlement present (weak)
+    LIKELY = "likely"               # symbols/framework linked (medium)
+    CONFIRMED_ACTIVE = "confirmed_active"    # runtime API call observed (high)
+    CONFIRMED_LOCATED = "confirmed_located"  # observed + attested endpoint found (highest)
+
+
 class BackendBehavior(str, Enum):
     """Attestation differential-test result (coarse, kept for compatibility)."""
     FAIL_CLOSED = "fail_closed"      # refuses without valid attestation (real defense)
