@@ -25,7 +25,7 @@ log = get_logger("acquire", CONFIG.paths.log_dir)
 
 # Substrings in ipadecrypt output that mean the app is permanently unavailable.
 _PERMANENT = ("not found", "no such app", "404", "not available",
-              "does not exist", "unavailable in", "license")
+              "does not exist", "unavailable in")
 _TOO_LARGE = ("too large", "exceeds")
 
 
@@ -49,7 +49,9 @@ def _short_reason(text: str) -> str:
     t = (text or "").lower()
     if "301" in t or "another network" in t or "no usable authentication" in t:
         return "Apple auth throttled (HTTP 301)"
-    if "already" in t or "owned" in t or "licen" in t:
+    if "license is required" in t or "licence is required" in t:
+        return "license required (not yet acquired; use --purchase)"
+    if "already" in t or "owned" in t:
         return "already owned"
     if "not found" in t or "404" in t:
         return "not found"
@@ -129,19 +131,31 @@ def download_with_ipatool(app_id: str, row, purchase: bool = False,
 
     auth = ["--auth-code", auth_code] if auth_code else []
 
+    def _run_download(with_purchase: bool):
+        dl = [CONFIG.ipatool.cmd, "download", *idflags, "-o", str(enc), "--non-interactive"]
+        if with_purchase:
+            dl.append("--purchase")
+            dl += auth
+        return run_cmd(dl, timeout=900)
+
     log.info("  ipatool: downloading encrypted IPA%s ...",
              " (with --purchase)" if purchase else "")
-    dl = [CONFIG.ipatool.cmd, "download", *idflags, "-o", str(enc), "--non-interactive"]
-    if purchase:
-        dl.append("--purchase")
-        dl += auth
-    p = run_cmd(dl, timeout=900)
+    p = _run_download(purchase)
+
+    # Free app not yet in the library: `download` returns "license is required".
+    # Auto-acquire the free license with a single `download --purchase` retry
+    # (no separate purchase step). Free apps need no auth code.
+    low = (p.stdout + " " + p.stderr).lower()
+    if not purchase and ("license is required" in low or "licence is required" in low):
+        log.info("        license required -> retrying with --purchase (free license) ...")
+        p = _run_download(True)
+        low = (p.stdout + " " + p.stderr).lower()
+
     if enc.exists() and enc.stat().st_size > 0:
         log.info("        downloaded %.1f MB", _mb(enc))
         return True, str(enc), ""
-    low = (p.stdout + " " + p.stderr).lower()
     if "auth code" in low or "2fa" in low:
-        return False, "", "download needs 2FA/auth code (pass --auth-code)"
+        return False, "", "download needs 2FA/auth code (paid app; pass --auth-code)"
     return False, "", (p.stderr or p.stdout or "ipatool download failed")[:300]
 
 
