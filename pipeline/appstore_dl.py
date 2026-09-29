@@ -131,6 +131,44 @@ def lookup_app_id(bundle_id: str, country: str = "US") -> str | None:
     return str(infos.results[0].trackId)
 
 
+def list_versions(app_id: str, server_url: str, limit: int | None = None
+                  ) -> list[dict]:
+    """Return the app's historical versions, newest first, as
+    [{verId, shortVersion}]. Each entry costs one MZStore request (the store
+    only reveals the short version per external version id), so pass `limit` to
+    cap how many of the newest builds to resolve."""
+    store = _store_client(server_url)
+    resp = store.download(app_id, "", isRedownload=True)
+    if not resp.songList:
+        return []
+    ver_ids = list(resp.songList[0].metadata.softwareVersionExternalIdentifiers)
+    ver_ids.reverse()  # newest first
+    if limit:
+        ver_ids = ver_ids[:limit]
+    out = []
+    for vid in ver_ids:
+        try:
+            r = store.download(app_id, str(vid), isRedownload=True)
+            if r.songList:
+                out.append({"verId": str(vid),
+                            "shortVersion": r.songList[0].metadata.bundleShortVersionString})
+        except StoreException as e:
+            log.warning("  version %s not retrievable: %s", vid, e.errMsg)
+    return out
+
+
+def resolve_version(app_id: str, short_or_verid: str, server_url: str) -> str | None:
+    """Map a user-supplied version to a numeric externalVersionId. A bare number
+    is treated as a verId already; a dotted string (e.g. '1.0.5') is looked up in
+    the version history."""
+    if short_or_verid and "." not in short_or_verid:
+        return short_or_verid  # already a verId
+    for v in list_versions(app_id, server_url):
+        if v["shortVersion"] == short_or_verid:
+            return v["verId"]
+    return None
+
+
 def download_encrypted(app_id: str, out_dir: str, server_url: str,
                        country: str = "US", app_ver_id: str | None = None
                        ) -> tuple[bool, str, str]:

@@ -35,10 +35,26 @@ def cmd_crawl(args: argparse.Namespace) -> int:
 def cmd_acquire(args: argparse.Namespace) -> int:
     from . import acquire
     db = Database(CONFIG.paths.db)
+    # List available (older) versions for one app, then exit.
+    if getattr(args, "list_versions", False):
+        from . import appstore_dl
+        store_id = args.app_id
+        if not store_id and args.bundle:
+            store_id = appstore_dl.lookup_app_id(args.bundle, args.country.upper())
+        if not store_id:
+            print("--list-versions needs --app-id (or a resolvable --bundle)")
+            return 1
+        vers = appstore_dl.list_versions(str(store_id), CONFIG.appstore.itunes_server,
+                                         limit=args.version_limit)
+        print(f"{len(vers)} versions (newest first) for {store_id}:")
+        for v in vers:
+            print(f"  {v['shortVersion']:20} verId={v['verId']}")
+        return 0
     if args.bundle or args.app_id:
         state, path, err = acquire.acquire_one(db, bundle_id=args.bundle, app_id=args.app_id,
                                                country=args.country, from_appstore=args.from_appstore,
-                                               purchase=args.purchase, auth_code=args.auth_code or "")
+                                               purchase=args.purchase, auth_code=args.auth_code or "",
+                                               app_ver_id=args.version)
         if state.name == "POSITIVE":
             import os
             mb = os.path.getsize(path) / (1024 * 1024) if path and os.path.exists(path) else 0
@@ -191,6 +207,12 @@ def main() -> int:
                             "default off = download owned apps only, no purchase")
     p_acq.add_argument("--auth-code", help="Apple 2FA/verification code for --purchase")
     p_acq.add_argument("--from-appstore", action="store_true", help="force App Store fetch")
+    p_acq.add_argument("--version", help="download a specific OLD build: an externalVersionId "
+                                        "or a dotted short version (e.g. 1.0.5). appstore mode only")
+    p_acq.add_argument("--list-versions", action="store_true",
+                       help="list an app's available (older) versions and exit (appstore mode)")
+    p_acq.add_argument("--version-limit", type=int, default=None,
+                       help="cap how many newest versions to resolve for --list-versions")
     p_acq.set_defaults(func=cmd_acquire)
 
     p_static = sub.add_parser("static", help="static defense classifier over decrypted IPAs")

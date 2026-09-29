@@ -159,11 +159,15 @@ def download_with_ipatool(app_id: str, row, purchase: bool = False,
     return False, "", (p.stderr or p.stdout or "ipatool download failed")[:300]
 
 
-def download_with_appstore(app_id: str, row, country: str = "us") -> tuple[bool, str, str]:
+def download_with_appstore(app_id: str, row, country: str = "us",
+                           app_ver_id: str | None = None) -> tuple[bool, str, str]:
     """Download the still-encrypted IPA via the Windows iTunes server (MZStore
     protocol). Auth material comes from real iTunes, so it is not throttled like
     ipatool. Returns (ok, path, error). Stages the file as {app_id}.enc.ipa so
-    the decrypt/cleanup path is identical to the ipatool backend."""
+    the decrypt/cleanup path is identical to the ipatool backend.
+
+    app_ver_id: optional externalVersionId (or dotted short version) to fetch an
+    OLDER build instead of the current one."""
     from . import appstore_dl
 
     # The MZStore download needs the numeric App Store id.
@@ -178,10 +182,18 @@ def download_with_appstore(app_id: str, row, country: str = "us") -> tuple[bool,
     if not store_id:
         return False, "", "appstore needs a numeric app id (lookup failed)"
 
+    verid = None
+    if app_ver_id:
+        verid = appstore_dl.resolve_version(str(store_id), str(app_ver_id),
+                                            CONFIG.appstore.itunes_server)
+        if not verid:
+            return False, "", f"version {app_ver_id} not found in app history"
+
     work = CONFIG.paths.work_dir
     work.mkdir(parents=True, exist_ok=True)
     ok, path, err = appstore_dl.download_encrypted(
-        str(store_id), str(work), CONFIG.appstore.itunes_server, country.upper())
+        str(store_id), str(work), CONFIG.appstore.itunes_server, country.upper(),
+        app_ver_id=verid)
     if not ok:
         return False, "", err or "appstore download failed"
 
@@ -195,7 +207,8 @@ def download_with_appstore(app_id: str, row, country: str = "us") -> tuple[bool,
 
 
 def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = False,
-                auth_code: str = "", timeout: int = 900) -> tuple[WorkState, str, str]:
+                auth_code: str = "", timeout: int = 900,
+                app_ver_id: str | None = None) -> tuple[WorkState, str, str]:
     """Acquire + decrypt one app. Returns (work_state, ipa_path, error).
 
     Two modes (config.acquire_mode):
@@ -203,11 +216,15 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
                   decrypts in one step.
       ipatool:    ipatool downloads the encrypted IPA, then ipadecrypt decrypts
                   that local file.
+      appstore:   MZStore download via the Windows iTunes server (supports
+                  app_ver_id to fetch an OLDER build), then ipadecrypt decrypts.
     """
     CONFIG.paths.ipa_dir.mkdir(parents=True, exist_ok=True)
     # Decrypted outputs are marked ".decrypted.ipa" so they're never confused
-    # with encrypted App Store IPAs.
-    out = CONFIG.paths.ipa_dir / f"{app_id}.decrypted.ipa"
+    # with encrypted App Store IPAs. A specific older version gets its verId in
+    # the name so it never collides with the current build.
+    suffix = f"-v{app_ver_id}" if app_ver_id else ""
+    out = CONFIG.paths.ipa_dir / f"{app_id}{suffix}.decrypted.ipa"
     if out.exists() and out.stat().st_size > 0:
         return WorkState.POSITIVE, str(out), ""
 
@@ -215,7 +232,8 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
     ident = _identifier(row)
     if CONFIG.acquire_mode in ("ipatool", "appstore"):
         if CONFIG.acquire_mode == "appstore":
-            ok, enc_path, err = download_with_appstore(app_id, row, country=country)
+            ok, enc_path, err = download_with_appstore(app_id, row, country=country,
+                                                       app_ver_id=app_ver_id)
         else:
             ok, enc_path, err = download_with_ipatool(app_id, row, purchase=purchase, auth_code=auth_code)
         if not ok:
@@ -264,22 +282,29 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
 
 def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None = None,
                 country: str = "us", from_appstore: bool = False, purchase: bool = False,
-                auth_code: str = "") -> tuple[WorkState, str, str]:
+                auth_code: str = "", app_ver_id: str | None = None) -> tuple[WorkState, str, str]:
     """Download + install + decrypt ONE specific app by bundle id and/or numeric
     App Store id. At least one identifier is required. Returns
-    (work_state, ipa_path, error) and records it in the DB like the corpus path."""
+    (work_state, ipa_path, error) and records it in the DB like the corpus path.
+
+    app_ver_id (appstore mode only): a specific externalVersionId or dotted short
+    version to fetch an OLDER build instead of the current one."""
     if not bundle_id and not app_id:
         return WorkState.DONE_NEGATIVE, "", "need a bundle id or app id"
     if not CONFIG.decrypt_device.is_bootstrapped:
         return WorkState.UNTESTED, "", "ipadecrypt not bootstrapped"
     if CONFIG.acquire_mode == "ipatool" and not _ipatool_login():
         return WorkState.UNTESTED, "", "ipatool not authenticated"
+    if app_ver_id and CONFIG.acquire_mode != "appstore":
+        return WorkState.DONE_NEGATIVE, "", "--version needs ACQUIRE_MODE=appstore"
     key = bundle_id or str(app_id)          # DB primary key / output filename
     row = {"app_id": key, "bundle_id": bundle_id, "country": country, "store_id": app_id}
     label = bundle_id or f"id{app_id}"
-    log.info("== acquire %s (%s)%s ==", label, country.upper(),
-             " [purchase]" if purchase else "")
-    state, path, err = decrypt_one(key, row, from_appstore, purchase=purchase, auth_code=auth_code)
+    log.info("== acquire %s (%s)%s%s ==", label, country.upper(),
+             " [purchase]" if purchase else "",
+             f" [version {app_ver_id}]" if app_ver_id else "")
+    state, path, err = decrypt_one(key, row, from_appstore, purchase=purchase,
+                                   auth_code=auth_code, app_ver_id=app_ver_id)
     db.upsert_app(key, country, bundle_id=bundle_id)
     db.save_acquisition(key, state, ipa_path=path, error=err)
     if state == WorkState.POSITIVE:
