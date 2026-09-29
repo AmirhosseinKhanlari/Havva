@@ -19,7 +19,7 @@ import re
 from .config import CONFIG
 from .db import Database
 from .models import Stage, WorkState
-from .util import get_logger, run_cmd
+from .util import get_logger, run_cmd, run_cmd_streamed
 
 log = get_logger("acquire", CONFIG.paths.log_dir)
 
@@ -253,7 +253,8 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
             cmd.append("--from-appstore")
 
     log.info("  decrypting on device (ipadecrypt) ...")
-    proc = run_cmd(cmd, timeout=timeout)
+    # Stream ipadecrypt's live output so its progress is visible.
+    proc = run_cmd_streamed(cmd, timeout=timeout)
 
     # Clean up the encrypted staging file if we made one.
     enc = CONFIG.paths.work_dir / f"{app_id}.enc.ipa"

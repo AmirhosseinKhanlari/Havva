@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +36,53 @@ def run_cmd(cmd: list[str] | str, timeout: int = 120, cwd: Path | None = None,
                     f"timeout after {timeout}s")
     except FileNotFoundError as e:
         return Proc(127, "", str(e))
+
+
+def run_cmd_streamed(cmd: list[str] | str, timeout: int = 900,
+                     cwd: Path | None = None, env: dict | None = None,
+                     echo: bool = True) -> Proc:
+    """Like run_cmd, but streams the child's output live to the terminal (so a
+    tool's own progress bar / carriage-return updates are visible) while still
+    capturing it for parsing. stderr is merged into stdout. Never raises."""
+    shell = isinstance(cmd, str)
+    try:
+        p = subprocess.Popen(
+            cmd, shell=shell, cwd=str(cwd) if cwd else None, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+        )
+    except FileNotFoundError as e:
+        return Proc(127, "", str(e))
+
+    chunks: list[bytes] = []
+
+    def _pump():
+        assert p.stdout is not None
+        for chunk in iter(lambda: p.stdout.read(4096), b""):
+            chunks.append(chunk)
+            if echo:
+                try:
+                    sys.stderr.buffer.write(chunk)
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_pump, daemon=True)
+    t.start()
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        t.join(timeout=2)
+        return Proc(124, b"".join(chunks).decode("utf-8", "replace"),
+                    f"timeout after {timeout}s")
+    t.join(timeout=2)
+    if echo:
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+    return Proc(p.returncode, b"".join(chunks).decode("utf-8", "replace"), "")
 
 
 def get_logger(name: str, log_dir: Path | None = None) -> logging.Logger:

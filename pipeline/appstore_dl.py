@@ -17,11 +17,17 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import plistlib
 import time
 import zipfile
 
 import requests
+
+try:
+    from tqdm import tqdm
+except Exception:  # tqdm optional; fall back to no bar
+    tqdm = None
 
 from .appstore.store import StoreClient, StoreException, CONFIGURATOR_UA
 from .appstore.itunes import iTunesClient
@@ -43,11 +49,17 @@ def _download_file(url: str, outfile: str, retries: int = 6) -> None:
                 if not total:
                     raise RuntimeError("server returned no Content-Length")
                 got = 0
+                bar = tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024,
+                           desc="  download", file=sys.stderr, leave=False) if tqdm else None
                 with open(outfile, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             f.write(chunk)
                             got += len(chunk)
+                            if bar:
+                                bar.update(len(chunk))
+                if bar:
+                    bar.close()
                 if got != total:
                     raise RuntimeError(f"incomplete download {got}/{total}")
             return
