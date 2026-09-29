@@ -159,6 +159,41 @@ def download_with_ipatool(app_id: str, row, purchase: bool = False,
     return False, "", (p.stderr or p.stdout or "ipatool download failed")[:300]
 
 
+def download_with_appstore(app_id: str, row, country: str = "us") -> tuple[bool, str, str]:
+    """Download the still-encrypted IPA via the Windows iTunes server (MZStore
+    protocol). Auth material comes from real iTunes, so it is not throttled like
+    ipatool. Returns (ok, path, error). Stages the file as {app_id}.enc.ipa so
+    the decrypt/cleanup path is identical to the ipatool backend."""
+    from . import appstore_dl
+
+    # The MZStore download needs the numeric App Store id.
+    store_id = _field(row, "store_id")
+    if not store_id:
+        cand = str(_field(row, "app_id") or "")
+        store_id = cand if cand.isdigit() else None
+    if not store_id:
+        bundle = _field(row, "bundle_id")
+        if bundle:
+            store_id = appstore_dl.lookup_app_id(bundle, country.upper())
+    if not store_id:
+        return False, "", "appstore needs a numeric app id (lookup failed)"
+
+    work = CONFIG.paths.work_dir
+    work.mkdir(parents=True, exist_ok=True)
+    ok, path, err = appstore_dl.download_encrypted(
+        str(store_id), str(work), CONFIG.appstore.itunes_server, country.upper())
+    if not ok:
+        return False, "", err or "appstore download failed"
+
+    enc = work / f"{app_id}.enc.ipa"
+    try:
+        if os.path.abspath(path) != os.path.abspath(enc):
+            os.replace(path, enc)
+    except OSError as e:
+        return False, "", f"stage rename failed: {e}"
+    return True, str(enc), ""
+
+
 def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = False,
                 auth_code: str = "", timeout: int = 900) -> tuple[WorkState, str, str]:
     """Acquire + decrypt one app. Returns (work_state, ipa_path, error).
@@ -178,8 +213,11 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
 
     country = _field(row, "country") or "us"
     ident = _identifier(row)
-    if CONFIG.acquire_mode == "ipatool":
-        ok, enc_path, err = download_with_ipatool(app_id, row, purchase=purchase, auth_code=auth_code)
+    if CONFIG.acquire_mode in ("ipatool", "appstore"):
+        if CONFIG.acquire_mode == "appstore":
+            ok, enc_path, err = download_with_appstore(app_id, row, country=country)
+        else:
+            ok, enc_path, err = download_with_ipatool(app_id, row, purchase=purchase, auth_code=auth_code)
         if not ok:
             low = err.lower()
             if any(m in low for m in _PERMANENT):

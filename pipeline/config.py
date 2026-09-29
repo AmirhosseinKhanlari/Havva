@@ -119,6 +119,15 @@ class IpaTool:
 
 
 @dataclass(frozen=True)
+class AppStore:
+    """Alternative downloader (ACQUIRE_MODE=appstore): speaks the MZStore
+    protocol directly, taking auth material (guid/kbsync/headers) from a real
+    iTunes running on a Windows VM (the "iTunes server"). Not throttled like
+    headless ipatool. Downloads the encrypted IPA; the iPhone 8 then decrypts."""
+    itunes_server: str = field(default_factory=lambda: _env("ITUNES_SERVER", "http://10.211.55.10:9000"))
+
+
+@dataclass(frozen=True)
 class TestDevice:
     """Non-jailbroken iPhone XR used for all bypass testing."""
     udid: str = field(default_factory=lambda: _env("TEST_DEVICE_UDID", ""))
@@ -193,6 +202,7 @@ class Config:
     paths: Paths = field(default_factory=Paths)
     decrypt_device: DecryptDevice = field(default_factory=DecryptDevice)
     ipatool: IpaTool = field(default_factory=IpaTool)
+    appstore: AppStore = field(default_factory=AppStore)
     test_device: TestDevice = field(default_factory=TestDevice)
     appium: Appium = field(default_factory=Appium)
     proxyman: Proxyman = field(default_factory=Proxyman)
