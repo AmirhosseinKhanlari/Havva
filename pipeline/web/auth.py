@@ -11,12 +11,12 @@ from ..config import _env
 from .app import templates
 
 log = logging.getLogger("web.auth")
-COOKIE_NAME = "satella_session"
+COOKIE_NAME = "havva_session"
 
 
 def _serializer() -> URLSafeSerializer:
     secret = _env("WEB_AUTH_TOKEN", "") or "insecure-dev-secret"
-    return URLSafeSerializer(secret, salt="satella")
+    return URLSafeSerializer(secret, salt="havva")
 
 
 def _valid_cookie(request: Request) -> bool:

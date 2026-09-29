@@ -205,7 +205,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="DB counts and config readiness").set_defaults(func=cmd_status)
     sub.add_parser("doctor", help="check tools and assets").set_defaults(func=cmd_doctor)
-    sub.add_parser("web", help="launch the Satella Console web UI").set_defaults(func=cmd_web)
+    sub.add_parser("web", help="launch the Havva web UI").set_defaults(func=cmd_web)
 
     p_crawl = sub.add_parser("crawl", help="crawl AppFigures + enrich with iTunes metadata")
     p_crawl.add_argument("--countries", help="comma list, overrides STOREFRONTS")

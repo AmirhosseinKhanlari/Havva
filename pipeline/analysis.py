@@ -353,7 +353,7 @@ def analyze_ipa(ipa_path: str) -> dict:
                     "file_tree": [], "crypto_hints": [],
                     "binary_protections": {}, "insecure_apis": [],
                     "binary_type": "unknown", "security_score": {}}
-    tmp = Path(tempfile.mkdtemp(prefix="satella-analysis-"))
+    tmp = Path(tempfile.mkdtemp(prefix="havva-analysis-"))
     try:
         with zipfile.ZipFile(ipa_path) as zf:
             app_dir = _find_app_dir(zf.namelist())

@@ -98,7 +98,7 @@ vphone iOS VM (tap, type, screenshot, read screen) over the VM's control socket.
 Activate: restart Claude Code and approve the project MCP; it only works while a
 vphone VM is running. Re-clone with `git clone https://github.com/pluginslab/vphone-mcp tools/vphone-mcp && (cd tools/vphone-mcp && uv sync)`.
 
-## Satella Console (web UI)
+## Havva (web UI)
 
 A mobile-friendly web UI over the whole pipeline: run any stage or the full
 funnel, watch live progress, browse results. The CLI keeps working exactly as

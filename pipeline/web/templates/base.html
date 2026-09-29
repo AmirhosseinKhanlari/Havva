@@ -3,13 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>{% block title %}Satella Console{% endblock %}</title>
+  <title>{% block title %}Havva{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/console.css">
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
   <script>
-    (function(){try{var t=localStorage.getItem('satella-theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
-    function setTheme(t){try{localStorage.setItem('satella-theme',t);}catch(e){}
+    (function(){try{var t=localStorage.getItem('havva-theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
+    function setTheme(t){try{localStorage.setItem('havva-theme',t);}catch(e){}
       if(t==='auto')document.documentElement.removeAttribute('data-theme');
       else document.documentElement.setAttribute('data-theme',t);}
     // Ask for notification permission on the first click (a user gesture), so
@@ -25,7 +26,7 @@
   <div class="wrap">
     <div class="page-head">
       <div>
-        <div class="brand"><span class="mark"><i></i></span><span>Satella</span></div>
+        <div class="brand"><span class="mark">{% include "_eye.svg" %}</span><span>Havva</span></div>
         <h1 class="title">{% block h1 %}Console{% endblock %}</h1>
         {% block subtitle %}{% endblock %}
       </div>

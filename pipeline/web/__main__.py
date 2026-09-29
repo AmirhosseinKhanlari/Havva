@@ -1,4 +1,4 @@
-"""Launch the Satella Console server: python3 -m pipeline.web"""
+"""Launch the Havva server: python3 -m pipeline.web"""
 from __future__ import annotations
 
 import uvicorn

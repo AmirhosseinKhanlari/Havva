@@ -1,4 +1,4 @@
-"""FastAPI application factory for Satella Console."""
+"""FastAPI application factory for Havva."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -35,7 +35,7 @@ def get_jobs_manager():
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Satella Console", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Havva", docs_url=None, redoc_url=None)
 
     from fastapi.staticfiles import StaticFiles
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
