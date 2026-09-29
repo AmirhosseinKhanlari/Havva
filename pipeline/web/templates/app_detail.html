@@ -4,7 +4,7 @@
 {% block subtitle %}<p class="subtitle mono">{{ app['bundle_id'] or '' }} · {{ app_id }}</p>{% endblock %}
 {% block content %}
 <div class="section">
-  <div style="margin-bottom:14px"><a href="/corpus">‹ Corpus</a></div>
+  <div style="margin-bottom:16px"><a href="/corpus" class="pill small" style="text-decoration:none"><span style="font-size:15px;line-height:1">‹</span> Corpus</a></div>
   <div class="tabbar">
     {% for t in tabs %}
     <button class="{% if t==tab %}on{% endif %}"
