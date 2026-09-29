@@ -33,7 +33,9 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
     if tab == "acquire":
         ctx["acq"] = db.get_acquisition(app_id)
     elif tab == "static":
-        ctx["profile"] = db.get_static_profile(app_id)
+        prof = db.get_static_profile(app_id)
+        ctx["profile"] = prof
+        ctx["matched"] = _decode_matched(prof)
         an = db.get_analysis(app_id)
         ctx["analysis"] = _decode_analysis(an) if an else None
     elif tab == "dynamic":
@@ -42,6 +44,35 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
     elif tab == "attest":
         ctx["attestation"] = db.get_attestation(app_id)
     return ctx
+
+
+_MATCH_LABELS = {
+    "pin": "Native pinning", "pinlib": "Pin library", "tls": "TLS stack",
+    "anti_tamper": "Anti-tamper", "anti_debug": "Anti-debug",
+    "jailbreak_detection": "Jailbreak detection", "appattest": "App Attest",
+    "devicecheck": "DeviceCheck", "networkextension": "Network Extension",
+}
+
+
+def _decode_matched(profile) -> list[dict]:
+    """Parse static_profile.matched_patterns JSON into [{label, tokens}] groups
+    with human labels, for a clean UI instead of raw JSON."""
+    import json
+    if not profile:
+        return []
+    try:
+        raw = json.loads(profile["matched_patterns"] or "{}")
+    except Exception:
+        return []
+    groups = []
+    for key, tokens in raw.items():
+        base = key.split(":", 1)
+        label = _MATCH_LABELS.get(base[0], base[0].replace("_", " ").title())
+        if len(base) == 2:
+            label = f"{label}: {base[1]}"
+        toks = tokens if isinstance(tokens, list) else [tokens]
+        groups.append({"label": label, "tokens": [str(t) for t in toks]})
+    return groups
 
 
 def _decode_analysis(row) -> dict:
