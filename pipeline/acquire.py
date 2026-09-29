@@ -67,15 +67,24 @@ def download_with_ipatool(app_id: str, row) -> tuple[bool, str, str]:
         store_id = cand if cand.isdigit() else None
     enc = CONFIG.paths.work_dir / f"{app_id}.enc.ipa"
     enc.parent.mkdir(parents=True, exist_ok=True)
+    # Identifier flags (bundle id overrides numeric app id).
     if bundle:
-        cmd = [CONFIG.ipatool.cmd, "download", "-b", bundle, "-o", str(enc),
-               "--purchase", "--non-interactive"]
+        idflags = ["-b", bundle]
     elif store_id:
-        cmd = [CONFIG.ipatool.cmd, "download", "-i", str(store_id), "-o", str(enc),
-               "--purchase", "--non-interactive"]
+        idflags = ["-i", str(store_id)]
     else:
         return False, "", "ipatool needs a bundle id or numeric app id"
-    p = run_cmd(cmd, timeout=900)
+
+    # 1. Obtain the license first (free apps must be "purchased" to the account).
+    #    Best-effort: an already-owned app returns an error we intentionally ignore.
+    pr = run_cmd([CONFIG.ipatool.cmd, "purchase", *idflags, "--non-interactive"], timeout=120)
+    low = (pr.stdout + " " + pr.stderr).lower()
+    if not pr.ok and not any(m in low for m in ("already", "owned", "licen")):
+        log.info("ipatool purchase note (%s): %s", app_id, (pr.stderr or pr.stdout)[:160])
+
+    # 2. Download the (now-licensed) encrypted IPA.
+    p = run_cmd([CONFIG.ipatool.cmd, "download", *idflags, "-o", str(enc),
+                 "--purchase", "--non-interactive"], timeout=900)
     if enc.exists() and enc.stat().st_size > 0:
         return True, str(enc), ""
     return False, "", (p.stderr or p.stdout or "ipatool download failed")[:300]
