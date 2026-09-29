@@ -108,8 +108,10 @@ def download_with_ipatool(app_id: str, row, purchase: bool = False,
 
     purchase=False (default): plain download, works for apps ALREADY in the
       account's library; never triggers a purchase (so no 'auth code required').
-    purchase=True: obtain the license first (needed for unowned apps); Apple may
-      require an --auth-code, pass it via auth_code.
+    purchase=True: single `ipatool download --purchase` call, which obtains the
+      license and downloads in one step (needed for unowned/free-but-not-yet-
+      acquired apps). No separate `ipatool purchase` step. Apple may require an
+      --auth-code, pass it via auth_code.
     """
     bundle = _field(row, "bundle_id")
     store_id = _field(row, "store_id")
@@ -127,19 +129,8 @@ def download_with_ipatool(app_id: str, row, purchase: bool = False,
 
     auth = ["--auth-code", auth_code] if auth_code else []
 
-    if purchase:
-        log.info("  [1/2] ipatool: obtaining license (purchase) ...")
-        pr = run_cmd([CONFIG.ipatool.cmd, "purchase", *idflags, *auth, "--non-interactive"],
-                     timeout=120)
-        low = (pr.stdout + " " + pr.stderr).lower()
-        if not pr.ok and "auth code" in low:
-            return False, "", "purchase needs 2FA/auth code (unowned app)"
-        if not pr.ok and not any(m in low for m in ("already", "owned", "licen")):
-            log.info("        purchase note: %s", _short_reason(pr.stderr or pr.stdout))
-        else:
-            log.info("        license ok")
-
-    log.info("  %s ipatool: downloading encrypted IPA ...", "[2/2]" if purchase else "[1/1]")
+    log.info("  ipatool: downloading encrypted IPA%s ...",
+             " (with --purchase)" if purchase else "")
     dl = [CONFIG.ipatool.cmd, "download", *idflags, "-o", str(enc), "--non-interactive"]
     if purchase:
         dl.append("--purchase")
@@ -148,6 +139,9 @@ def download_with_ipatool(app_id: str, row, purchase: bool = False,
     if enc.exists() and enc.stat().st_size > 0:
         log.info("        downloaded %.1f MB", _mb(enc))
         return True, str(enc), ""
+    low = (p.stdout + " " + p.stderr).lower()
+    if "auth code" in low or "2fa" in low:
+        return False, "", "download needs 2FA/auth code (pass --auth-code)"
     return False, "", (p.stderr or p.stdout or "ipatool download failed")[:300]
 
 
