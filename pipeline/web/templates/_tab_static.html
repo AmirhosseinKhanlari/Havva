@@ -16,10 +16,25 @@
 </div>
 
 <section class="tiles" style="margin-bottom:14px">
-  {% for label, key in [('TLS stack','tls_stack'),('App Attest','appattest_flag'),('DeviceCheck','devicecheck_flag'),('Anti-tamper','anti_tamper_hints'),('Anti-debug','anti_debug_hints'),('JB detect','jailbreak_detection_hints'),('NetworkExt','networkextension_flag')] %}
+  {% set aal = profile['appattest_level'] or ('referenced' if profile['appattest_flag'] else 'none') %}
+  {% set aacol = {'production':'var(--ok)','adopted':'var(--accent)','referenced':'var(--warn)','none':'var(--ink3)'}[aal] %}
+  <div class="glass sm" style="padding:14px 16px">
+    <div class="muted" style="font-size:11.5px;margin-bottom:5px">App Attest</div>
+    <div style="font-size:15px;font-weight:700;color:{{ aacol }};text-transform:capitalize">{{ aal }}</div>
+  </div>
+  {% for label, key in [('TLS stack','tls_stack'),('DeviceCheck','devicecheck_flag'),('Anti-tamper','anti_tamper_hints'),('Anti-debug','anti_debug_hints'),('JB detect','jailbreak_detection_hints'),('NetworkExt','networkextension_flag')] %}
   <div class="glass sm" style="padding:14px 16px"><div class="muted" style="font-size:11.5px;margin-bottom:5px">{{ label }}</div><div style="font-size:15px;font-weight:600">{{ profile[key] }}</div></div>
   {% endfor %}
 </section>
+{% if aal != 'none' %}
+<p class="muted" style="font-size:12px;margin:-6px 0 14px">
+  App Attest adoption: <b style="color:{{ aacol }};text-transform:capitalize">{{ aal }}</b> —
+  {% if aal=='production' %}provisioned with a production entitlement (ships it for real).
+  {% elif aal=='adopted' %}provisioned with the App Attest entitlement (dev/unspecified env).
+  {% else %}API symbols only, no entitlement (could be an unused SDK). Confirm at runtime with attest-detect.{% endif %}
+  Adoption is not enforcement, run the Attest tab to test the server.
+</p>
+{% endif %}
 {% if matched %}
 <details class="card" style="margin-bottom:24px" open><summary><span class="caret">›</span>Matched evidence <span class="muted" style="font-weight:500">({{ matched|length }})</span></summary>
   <div class="dbody hlist" style="gap:12px;padding-top:6px">

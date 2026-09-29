@@ -1,15 +1,18 @@
 <div id="jobs-table" class="hlist">
   {% for j in jobs %}
+  {% set jrun = j['state'] in ('running','queued') %}
+  {% set jindet = jrun and (j['progress_pct'] or 0) == 0 %}
   <div class="glass sm" style="padding:15px 18px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:11px">
       <span class="mono" style="font-size:12px;font-weight:700;color:var(--ink3)">#{{ j['id'] }}</span>
+      {% if jrun %}<span class="spinner"></span>{% endif %}
       <span style="font-size:15px;font-weight:600;text-transform:capitalize">{{ j['kind'] }}</span>
       <span class="mono" style="font-size:12px;color:var(--ink3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ j['target'] }}</span>
       <span class="state {{ j['state'] }}" style="margin-left:auto">{{ j['state'] }}</span>
     </div>
     <div style="display:flex;align-items:center;gap:14px">
-      <div class="track" style="flex:1"><i style="width:{{ j['progress_pct'] }}%"></i></div>
-      <span style="font-size:13px;font-weight:600;width:42px;text-align:right;color:var(--ink2)">{{ j['progress_pct'] }}%</span>
+      <div class="track {% if jindet %}indet{% endif %}" style="flex:1"><i {% if not jindet %}style="width:{{ j['progress_pct'] }}%"{% endif %}></i></div>
+      <span style="font-size:13px;font-weight:600;width:52px;text-align:right;color:var(--ink2)">{% if jindet %}working{% else %}{{ j['progress_pct'] }}%{% endif %}</span>
       <a href="/jobs/{{ j['id'] }}/stream" target="_blank" style="font-size:12.5px;font-weight:600">log</a>
       {% if j['state'] in ('queued','running') %}
       <button class="pill danger small" hx-post="/jobs/{{ j['id'] }}/cancel" hx-target="#jobs-table" hx-swap="outerHTML">cancel</button>

@@ -132,6 +132,7 @@ class DefenseProfile:
     anti_debug_hints: bool = False
     jailbreak_detection_hints: bool = False
     appattest_flag: bool = False
+    appattest_level: str = "none"   # none | referenced | adopted | production
     devicecheck_flag: bool = False
     networkextension_flag: bool = False
     matched_patterns: dict[str, list[str]] = field(default_factory=dict)

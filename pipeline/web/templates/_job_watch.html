@@ -2,15 +2,20 @@
 <div id="watch-{{ job['id'] }}"
      {% if not terminal %}hx-get="/jobs/{{ job['id'] }}/watch?reload={{ reload|urlencode }}"
      hx-trigger="load delay:1.2s" hx-swap="outerHTML"{% endif %}>
+  {% set running = job['state'] in ('running','queued') %}
+  {% set indet = running and (job['progress_pct'] or 0) == 0 %}
   <div class="glass sm" style="padding:12px 16px;margin-top:6px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      {% if running %}<span class="spinner"></span>{% endif %}
       <span style="font-size:13px;font-weight:600;text-transform:capitalize">{{ job['kind'] }}</span>
       <span class="mono muted" style="font-size:12px">{{ job['target'] }}</span>
       <span class="state {{ job['state'] }}" style="margin-left:auto">{{ job['state'] }}</span>
     </div>
     <div style="display:flex;align-items:center;gap:12px">
-      <div class="track" style="flex:1"><i style="width:{{ job['progress_pct'] }}%"></i></div>
-      <span style="font-size:12px;font-weight:600;width:38px;text-align:right;color:var(--ink2)">{{ job['progress_pct'] }}%</span>
+      <div class="track {% if indet %}indet{% endif %}" style="flex:1">
+        <i {% if not indet %}style="width:{{ job['progress_pct'] }}%"{% endif %}></i></div>
+      <span style="font-size:12px;font-weight:600;width:52px;text-align:right;color:var(--ink2)">
+        {%- if indet %}working{% else %}{{ job['progress_pct'] }}%{% endif -%}</span>
       <a href="/jobs/{{ job['id'] }}/stream" target="_blank" style="font-size:12px">log</a>
     </div>
   </div>

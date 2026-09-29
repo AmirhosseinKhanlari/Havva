@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS static_profile (
     anti_debug_hints INTEGER DEFAULT 0,
     jailbreak_detection_hints INTEGER DEFAULT 0,
     appattest_flag INTEGER DEFAULT 0,
+    appattest_level TEXT DEFAULT 'none', -- none|referenced|adopted|production
     devicecheck_flag INTEGER DEFAULT 0,
     networkextension_flag INTEGER DEFAULT 0,
     matched_patterns TEXT,               -- JSON
@@ -201,6 +202,7 @@ class Database:
         for col, decl in (("binary_protections", "TEXT"), ("insecure_apis", "TEXT"),
                           ("binary_type", "TEXT"), ("security_score", "TEXT")):
             self.add_column_if_missing("analysis", col, decl)
+        self.add_column_if_missing("static_profile", "appattest_level", "TEXT DEFAULT 'none'")
 
     def add_column_if_missing(self, table: str, column: str, decl: str) -> None:
         """The paper-1 `ensure_rc_columns` idiom: additive migration."""
@@ -318,9 +320,9 @@ class Database:
                 """INSERT INTO static_profile
                    (app_id, pins_flag, pin_layer, pin_library, tls_stack,
                     anti_tamper_hints, anti_debug_hints, jailbreak_detection_hints,
-                    appattest_flag, devicecheck_flag, networkextension_flag,
+                    appattest_flag, appattest_level, devicecheck_flag, networkextension_flag,
                     matched_patterns, static_state, analyzed_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(app_id) DO UPDATE SET
                      pins_flag=excluded.pins_flag, pin_layer=excluded.pin_layer,
                      pin_library=excluded.pin_library, tls_stack=excluded.tls_stack,
@@ -328,13 +330,14 @@ class Database:
                      anti_debug_hints=excluded.anti_debug_hints,
                      jailbreak_detection_hints=excluded.jailbreak_detection_hints,
                      appattest_flag=excluded.appattest_flag,
+                     appattest_level=excluded.appattest_level,
                      devicecheck_flag=excluded.devicecheck_flag,
                      networkextension_flag=excluded.networkextension_flag,
                      matched_patterns=excluded.matched_patterns,
                      static_state=excluded.static_state, analyzed_at=excluded.analyzed_at""",
                 (app_id, int(p.pins_flag), p.pin_layer.value, p.pin_library, p.tls_stack.value,
                  int(p.anti_tamper_hints), int(p.anti_debug_hints), int(p.jailbreak_detection_hints),
-                 int(p.appattest_flag), int(p.devicecheck_flag), int(p.networkextension_flag),
+                 int(p.appattest_flag), p.appattest_level, int(p.devicecheck_flag), int(p.networkextension_flag),
                  json.dumps(p.matched_patterns), int(WorkState.POSITIVE), _now()),
             )
 

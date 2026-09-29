@@ -154,11 +154,21 @@ def classify(app: ExtractedApp) -> DefenseProfile:
         prof.pin_layer = PinLayer.L2_DELEGATE
         matched["pin:delegate"] = delegate_hits
 
-    # --- App Attest / DeviceCheck (presence) ---
+    # --- App Attest / DeviceCheck (graded adoption) ---
+    # Level grades how strongly the app adopts App Attest, since mere API presence
+    # is a soft signal (could be dead code): the entitlement means it is actually
+    # provisioned for App Attest, and a 'production' environment means it ships it.
     aa = _find_all(hay, APPATTEST_MARKERS)
-    if aa or app.entitlements.get(ENT_APPATTEST):
+    ent_val = app.entitlements.get(ENT_APPATTEST)
+    if aa or ent_val:
         prof.appattest_flag = True
-        matched["appattest"] = aa + ([ENT_APPATTEST] if app.entitlements.get(ENT_APPATTEST) else [])
+        if ent_val and str(ent_val).lower() == "production":
+            prof.appattest_level = "production"
+        elif ent_val:
+            prof.appattest_level = "adopted"       # entitlement present (dev or unspecified env)
+        else:
+            prof.appattest_level = "referenced"    # API symbols only, no entitlement
+        matched["appattest"] = aa + ([f"{ENT_APPATTEST}={ent_val}"] if ent_val else [])
     dc = _find_all(hay, DEVICECHECK_MARKERS)
     if dc:
         prof.devicecheck_flag = True
