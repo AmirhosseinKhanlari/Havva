@@ -113,8 +113,9 @@ select.field::-ms-expand{display:none}
 
 /* tab bar (app detail) */
 .tabbar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px;padding:4px;border-radius:15px;background:var(--field);border:1px solid var(--field-brd);backdrop-filter:blur(20px)}
-.tabbar button{flex:1;min-width:76px;padding:9px 6px;font-size:13px;font-weight:600;text-transform:capitalize;border:none;border-radius:11px;cursor:pointer;color:var(--ink2);background:transparent;transition:all .2s ease}
-.tabbar button.on{color:var(--ink);background:var(--glass2);box-shadow:0 1px 0 var(--glass-hi) inset,0 6px 16px -10px var(--shadow)}
+.tabbar button{flex:1;min-width:76px;padding:9px 6px;font-size:13px;font-weight:600;text-transform:capitalize;border:1px solid transparent;border-radius:11px;cursor:pointer;color:var(--ink2);background:transparent;transition:transform .18s cubic-bezier(.34,1.56,.64,1),background .18s ease,box-shadow .18s ease,color .18s ease}
+.tabbar button:active{transform:scale(.94)}
+.tabbar button.on{color:var(--ink);transform:translateY(-1px);background:var(--glass2);border-color:var(--glass-brd);box-shadow:0 1px 0 var(--glass-hi) inset,0 -1px 3px rgba(0,0,0,.06) inset,0 6px 16px -6px var(--shadow)}
 
 /* banner (pinning verdict) */
 .banner{position:relative;overflow:hidden;padding:18px 20px;border-radius:20px;background:var(--glass);border:1px solid var(--glass-brd);box-shadow:0 1px 0 var(--glass-hi) inset}
