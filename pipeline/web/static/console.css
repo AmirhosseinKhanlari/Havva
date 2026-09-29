@@ -68,6 +68,10 @@ h1.title{margin:0;font-size:34px;font-weight:700;letter-spacing:-.03em;line-heig
 .tile .lbl{margin-top:8px;font-size:12.5px;font-weight:500;color:var(--ink2)}
 .tile .dot{position:absolute;top:16px;right:16px;width:8px;height:8px;border-radius:50%}
 
+/* key/value tiles (overview, static): clip + wrap long values like bundle ids */
+.tiles > .glass.sm{overflow:hidden;min-width:0}
+.tiles > .glass.sm > div{min-width:0;overflow-wrap:anywhere;word-break:break-word}
+
 /* buttons */
 .pill{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;font-size:13.5px;font-weight:600;border-radius:12px;cursor:pointer;transition:transform .12s ease,filter .12s ease;color:var(--accent);background:var(--field);border:1px solid var(--field-brd)}
 .pill:hover{filter:brightness(1.15)} .pill:active{transform:scale(.96)}

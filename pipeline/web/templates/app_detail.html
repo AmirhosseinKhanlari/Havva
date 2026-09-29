@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ app['name'] or app_id }}{% endblock %}
-{% block h1 %}{{ app['name'] or app_id }}{% endblock %}
+{% block h1 %}<span style="display:inline-flex;align-items:center;gap:13px">{% if app['artwork_url'] %}<img src="{{ app['artwork_url'] }}" alt="" style="width:44px;height:44px;border-radius:11px;object-fit:cover;box-shadow:0 6px 16px -8px var(--shadow)">{% endif %}<span>{{ app['name'] or app_id }}</span></span>{% endblock %}
 {% block subtitle %}<p class="subtitle mono">{{ app['bundle_id'] or '' }} · {{ app_id }}</p>{% endblock %}
 {% block content %}
 <div class="section">
