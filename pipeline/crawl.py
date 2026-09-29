@@ -247,12 +247,23 @@ def add_app(db: Database, identifier: str, country: str = "us") -> str | None:
     return app_id
 
 
+def _is_bundle_id(s: str) -> bool:
+    return "." in s and " " not in s and not s.replace(".", "").isdigit()
+
+
 def search_appstore(term: str, country: str = "us", limit: int = 15) -> list[dict]:
-    """Search the App Store by name. Returns lightweight rows for the add UI."""
+    """Find apps for the add UI. A numeric App Store id or a bundle id resolves to
+    the exact app (lookup); anything else is a keyword search."""
+    term = (term or "").strip()
     try:
-        r = requests.get(ITUNES_SEARCH, params={
-            "term": term, "country": country.lower(), "media": "software",
-            "entity": "software", "limit": limit}, timeout=30)
+        if term.isdigit() or _is_bundle_id(term):
+            params = {"country": country.lower()}
+            params["id" if term.isdigit() else "bundleId"] = term
+            r = requests.get(ITUNES_LOOKUP, params=params, timeout=30)
+        else:
+            r = requests.get(ITUNES_SEARCH, params={
+                "term": term, "country": country.lower(), "media": "software",
+                "entity": "software", "limit": limit}, timeout=30)
         r.raise_for_status()
         res = r.json().get("results", [])
     except (requests.RequestException, ValueError) as e:
