@@ -10,9 +10,14 @@
   <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
   <script>
     (function(){try{var t=localStorage.getItem('havva-theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
+    function markTheme(t){var els=document.querySelectorAll('#theme-seg .seg');
+      for(var i=0;i<els.length;i++){els[i].classList.toggle('on', els[i].getAttribute('data-theme-val')===t);}}
     function setTheme(t){try{localStorage.setItem('havva-theme',t);}catch(e){}
       if(t==='auto')document.documentElement.removeAttribute('data-theme');
-      else document.documentElement.setAttribute('data-theme',t);}
+      else document.documentElement.setAttribute('data-theme',t);
+      markTheme(t);}
+    document.addEventListener('DOMContentLoaded',function(){var t='auto';
+      try{t=localStorage.getItem('havva-theme')||'auto';}catch(e){} markTheme(t);});
     // Ask for notification permission on the first click (a user gesture), so
     // job-completion notifications can fire.
     document.addEventListener('click', function once(){
@@ -30,10 +35,10 @@
         <h1 class="title">{% block h1 %}Console{% endblock %}</h1>
         {% block subtitle %}{% endblock %}
       </div>
-      <div style="display:flex;padding:3px;gap:2px;border-radius:13px;background:var(--field);border:1px solid var(--field-brd)">
-        <button class="pill small" style="background:none;border:none" onclick="setTheme('auto')">Auto</button>
-        <button class="pill small" style="background:none;border:none" onclick="setTheme('light')">Light</button>
-        <button class="pill small" style="background:none;border:none" onclick="setTheme('dark')">Dark</button>
+      <div class="segmented" id="theme-seg">
+        <button class="seg" data-theme-val="auto" onclick="setTheme('auto')">Auto</button>
+        <button class="seg" data-theme-val="light" onclick="setTheme('light')">Light</button>
+        <button class="seg" data-theme-val="dark" onclick="setTheme('dark')">Dark</button>
       </div>
     </div>
     {% block content %}{% endblock %}
