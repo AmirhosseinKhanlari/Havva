@@ -153,11 +153,33 @@ details[open] > summary .caret{transform:rotate(90deg)}
 .dbody{padding:0 18px 16px}
 pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',ui-monospace,Menlo,monospace}
 
-/* floating nav */
-.navbar{position:fixed;z-index:5;left:50%;bottom:22px;transform:translateX(-50%);display:flex;gap:4px;padding:7px;border-radius:26px;background:var(--glass2);border:1px solid var(--glass-brd);backdrop-filter:blur(34px) saturate(200%);-webkit-backdrop-filter:blur(34px) saturate(200%);box-shadow:0 1px 0 var(--glass-hi) inset,0 18px 44px -16px var(--shadow)}
-.navbar a{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:66px;padding:8px 10px;border-radius:19px;text-decoration:none;color:var(--ink3);font-size:10.5px;font-weight:600;transition:all .18s ease}
-.navbar a.on{color:var(--accent);background:var(--field)}
-.navbar a .ico{font-size:17px;line-height:1}
+/* floating nav - iOS 26 Liquid Glass */
+.navbar{position:fixed;z-index:5;left:50%;bottom:22px;transform:translateX(-50%);
+  display:flex;gap:5px;padding:9px 11px;border-radius:32px;overflow:hidden;
+  background:linear-gradient(180deg,rgba(255,255,255,.20),rgba(255,255,255,.06));
+  border:1px solid var(--glass-brd);
+  backdrop-filter:blur(44px) saturate(210%);-webkit-backdrop-filter:blur(44px) saturate(210%);
+  box-shadow:
+    0 1.5px 0 rgba(255,255,255,.5) inset,      /* top rim light */
+    0 -1px 1px rgba(0,0,0,.12) inset,          /* bottom inner shade */
+    0 10px 26px -8px rgba(0,0,0,.35),          /* lift */
+    0 26px 56px -14px var(--shadow)}           /* soft floor shadow */
+.navbar::before{content:"";position:absolute;left:10px;right:10px;top:3px;height:42%;
+  border-radius:26px;pointer-events:none;opacity:.75;
+  background:linear-gradient(180deg,rgba(255,255,255,.45),rgba(255,255,255,0))}
+.navbar a{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+  min-width:68px;padding:9px 12px;border-radius:22px;text-decoration:none;color:var(--ink3);
+  border:1px solid transparent;
+  font-size:10.5px;font-weight:600;transition:transform .18s cubic-bezier(.34,1.56,.64,1),color .18s ease}
+.navbar a:active{transform:scale(.9)}
+.navbar a.on{color:var(--accent);transform:translateY(-1px);
+  background:linear-gradient(180deg,rgba(255,255,255,.30),rgba(255,255,255,.08));
+  border:1px solid rgba(255,255,255,.4);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,.75) inset,       /* lens top highlight */
+    0 -1px 3px rgba(0,0,0,.10) inset,          /* lens bottom refraction */
+    0 6px 16px -5px rgba(10,132,255,.45)}      /* accent glow */
+.navbar a .ico{font-size:18px;line-height:1}
 
 /* iOS segmented control (theme toggle) */
 .segmented{display:inline-flex;padding:3px;gap:3px;border-radius:12px;background:var(--field);border:1px solid var(--field-brd)}
