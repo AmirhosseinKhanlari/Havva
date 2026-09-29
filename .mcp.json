@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "vphone": {
+      "command": "/Users/amirhosseinkhanlari/.local/bin/uv",
+      "args": [
+        "--directory",
+        "/Users/amirhosseinkhanlari/Desktop/Satella/Final Project/SSLPINNING/tools/vphone-mcp",
+        "run",
+        "vphone-mcp"
+      ]
+    }
+  }
+}

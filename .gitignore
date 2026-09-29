@@ -29,3 +29,6 @@ venv/
 # ipadecrypt prebuilt binary (downloaded from releases)
 tools/ipadecrypt
 tools/checksums.txt
+
+# vendored external MCP server (re-clone via git)
+tools/vphone-mcp/

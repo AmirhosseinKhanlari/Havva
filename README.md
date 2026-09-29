@@ -89,3 +89,11 @@ Evasion is capped at measurement hygiene (avoid trivial detection, report the
 residue), never an attempt to defeat enforced attestation. Test accounts are
 researcher-owned. Decrypted binaries and captured traffic are gitignored and
 never committed.
+
+## vphone MCP (iOS VM control)
+
+`.mcp.json` registers the [vphone-mcp](https://github.com/pluginslab/vphone-mcp)
+server (cloned in `tools/vphone-mcp`, gitignored), which lets an agent drive the
+vphone iOS VM (tap, type, screenshot, read screen) over the VM's control socket.
+Activate: restart Claude Code and approve the project MCP; it only works while a
+vphone VM is running. Re-clone with `git clone https://github.com/pluginslab/vphone-mcp tools/vphone-mcp && (cd tools/vphone-mcp && uv sync)`.
