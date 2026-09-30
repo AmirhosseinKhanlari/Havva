@@ -26,18 +26,83 @@ from .util import run_cmd
 
 log = logging.getLogger("analysis")
 
-# Third-party SDKs worth fingerprinting (substring -> friendly name).
+# Third-party SDK fingerprints: friendly name -> distinctive signatures matched
+# against framework/dylib names AND the binary's strings (catches static linking).
+# Signatures are chosen to be specific (class prefixes / unique tokens) to avoid
+# false positives.
 _SDK_SIGNS = {
-    "Alamofire": "Alamofire", "AFNetworking": "AFNetworking", "TrustKit": "TrustKit",
-    "FirebaseCore": "Firebase", "FirebaseAnalytics": "Firebase Analytics",
-    "GoogleUtilities": "Google Utilities", "FBSDKCoreKit": "Facebook SDK",
-    "Branch": "Branch", "Segment": "Segment", "Analytics": "Segment/Analytics",
-    "Adjust": "Adjust", "AppsFlyer": "AppsFlyer", "Braze": "Braze",
-    "Sentry": "Sentry", "Bugsnag": "Bugsnag", "Crashlytics": "Crashlytics",
-    "Stripe": "Stripe", "Realm": "Realm", "SDWebImage": "SDWebImage",
-    "Kingfisher": "Kingfisher", "Lottie": "Lottie", "RxSwift": "RxSwift",
-    "KakaoSDK": "Kakao SDK", "LineSDK": "LINE SDK", "WeiboSDK": "Weibo SDK",
-    "OneSignal": "OneSignal", "Amplitude": "Amplitude", "Mixpanel": "Mixpanel",
+    # Purchases / paywalls / IAP
+    "RevenueCat": ["RevenueCat", "RCPurchases", "RCStoreProduct", "com.revenuecat"],
+    "Superwall": ["Superwall", "SuperwallKit"],
+    "Adapty": ["Adapty", "AdaptyUI"],
+    "Qonversion": ["Qonversion", "QNPurchases"],
+    "Glassfy": ["Glassfy"],
+    # Networking / TLS
+    "Alamofire": ["Alamofire"],
+    "AFNetworking": ["AFNetworking", "AFSecurityPolicy", "AFHTTPSessionManager"],
+    "TrustKit": ["TrustKit", "TSKPinningValidator", "kTSKPublicKeyHashes"],
+    # Firebase / Google
+    "Firebase": ["FirebaseCore", "FIRApp", "FIROptions"],
+    "Firebase Analytics": ["FirebaseAnalytics", "FIRAnalytics"],
+    "Firebase Crashlytics": ["Crashlytics", "FIRCLS", "FIRCrashlytics"],
+    "Firebase Messaging": ["FirebaseMessaging", "FIRMessaging"],
+    "Firebase Remote Config": ["FirebaseRemoteConfig", "FIRRemoteConfig"],
+    "Google Mobile Ads": ["GADMobileAds", "GoogleMobileAds", "GADRequest"],
+    "Google Sign-In": ["GoogleSignIn", "GIDSignIn"],
+    "Google Utilities": ["GoogleUtilities"],
+    # Attribution / analytics
+    "AppsFlyer": ["AppsFlyerLib", "AppsFlyer", "AFSDKAttribution"],
+    "Adjust": ["Adjust", "ADJConfig", "ADJEvent"],
+    "Branch": ["BranchSDK", "BNCConfig", "\"Branch\""],
+    "Singular": ["Singular", "SingularConfig"],
+    "Tenjin": ["Tenjin", "TenjinSDK"],
+    "Amplitude": ["Amplitude", "AMPTracking"],
+    "Mixpanel": ["Mixpanel", "MPTweak"],
+    "Segment": ["SEGAnalytics", "com.segment"],
+    "mParticle": ["mParticle", "MParticleUser"],
+    "Adobe Analytics": ["ADBMobile", "AEPCore", "ACPCore"],
+    "PostHog": ["PostHog", "PHGPostHog"],
+    "Heap": ["HeapAnalytics", "\"Heap\""],
+    "Pendo": ["PendoManager", "\"Pendo\""],
+    # Crash / monitoring
+    "Sentry": ["SentrySDK", "SentryClient", "io.sentry"],
+    "Bugsnag": ["Bugsnag", "BugsnagConfiguration"],
+    "Datadog": ["DatadogCore", "DDLogs", "DDTrace", "dd-sdk-ios"],
+    "New Relic": ["NewRelic", "NRMAAgent"],
+    "Instabug": ["Instabug", "IBGLog"],
+    "Embrace": ["EmbraceIO", "EMBEmbrace"],
+    "Firebase Performance": ["FirebasePerformance", "FIRPerformance"],
+    # Engagement / messaging / support
+    "OneSignal": ["OneSignal", "OSNotification"],
+    "Braze": ["BrazeKit", "Appboy", "ABKUser"],
+    "CleverTap": ["CleverTap", "CleverTapSDK"],
+    "Iterable": ["IterableAPI", "IterableSDK"],
+    "Airship": ["UAirship", "AirshipCore"],
+    "MoEngage": ["MoEngage", "MOInApp"],
+    "Intercom": ["Intercom", "ICMIntercom"],
+    "Zendesk": ["ZendeskSDK", "ZDKChat", "SupportSDK"],
+    "LaunchDarkly": ["LaunchDarkly", "LDClient"],
+    "Optimizely": ["Optimizely", "OPTLYClient"],
+    "Split": ["SplitSdk", "io.split"],
+    # Ads / mediation
+    "AppLovin MAX": ["AppLovinSDK", "ALSdk", "MAAd"],
+    "ironSource": ["IronSource", "ISConfigurations"],
+    "Unity Ads": ["UnityAds", "UADSServiceProvider"],
+    "Vungle": ["VungleSDK", "VungleAds"],
+    "AdColony": ["AdColony", "AdColonyAppOptions"],
+    # UI / utility / storage
+    "SDWebImage": ["SDWebImage", "SDImageCache"],
+    "Kingfisher": ["Kingfisher", "KFImage"],
+    "Lottie": ["Lottie", "LottieAnimationView"],
+    "RxSwift": ["RxSwift", "RxCocoa"],
+    "SnapKit": ["SnapKit", "ConstraintMaker"],
+    "Realm": ["RealmSwift", "RLMObject", "RLMRealm"],
+    "Stripe": ["StripeCore", "STPPaymentConfiguration", "StripePaymentSheet"],
+    # Social SDKs
+    "Facebook SDK": ["FBSDKCoreKit", "FBSDKApplicationDelegate"],
+    "Kakao SDK": ["KakaoSDK", "KakaoSDKCommon"],
+    "LINE SDK": ["LineSDK", "LineSDKLogin"],
+    "Weibo SDK": ["WeiboSDK"],
 }
 
 _CRYPTO_SYMS = ("SecItemAdd", "SecItemCopyMatching", "SecTrustEvaluate",
@@ -153,9 +218,16 @@ def frameworks(zf: zipfile.ZipFile, app_dir: str, bin_path: Path | None) -> dict
     return {"embedded": embedded, "linked": linked}
 
 
-def fingerprint_sdks(fw: dict) -> list[str]:
-    blob = " ".join(fw.get("embedded", []) + fw.get("linked", []))
-    found = {name for sign, name in _SDK_SIGNS.items() if sign in blob}
+def fingerprint_sdks(fw: dict, strings_blob: bytes = b"") -> list[str]:
+    """Detect third-party SDKs from framework/dylib names AND the binary strings
+    (so statically-linked SDKs with no separate .framework are caught too)."""
+    names = " ".join(fw.get("embedded", []) + fw.get("linked", []))
+    found = set()
+    for name, sigs in _SDK_SIGNS.items():
+        for sig in sigs:
+            if sig in names or sig.encode() in strings_blob:
+                found.add(name)
+                break
     return sorted(found)
 
 
@@ -372,10 +444,10 @@ def analyze_ipa(ipa_path: str) -> dict:
                     bin_path = tmp / member
 
             result["frameworks"] = _safe(frameworks, zf, app_dir, bin_path)
-            result["sdks"] = fingerprint_sdks(result["frameworks"])
             result["entitlements"] = _safe(entitlements, bin_path)
 
             blob = _strings_of(bin_path)
+            result["sdks"] = fingerprint_sdks(result["frameworks"], blob)
             result["crypto_hints"] = crypto_hints(blob)
             result["secrets"] = scan_secrets(blob)
             # emails + domains live alongside URLs in the secrets section
