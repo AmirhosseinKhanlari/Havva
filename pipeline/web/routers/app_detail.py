@@ -64,6 +64,8 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
     elif tab == "dynamic":
         ctx["runs"] = db.get_dynamic_runs(app_id)
         ctx["outcome"] = db.get_outcome(app_id)
+        from ... import instrument
+        ctx["dylibs"] = instrument.dylib_catalog()
     elif tab == "attest":
         ctx["attestation"] = db.get_attestation(app_id)
     return ctx
@@ -267,6 +269,30 @@ def act_dynamic(app_id: str, request: Request, _: None = Depends(require_auth)):
             ctx.log(f"outcome: {getattr(label, 'value', label)}\n")
 
     jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True)
+    return _watch(request, app_id, jid, "dynamic")
+
+
+@router.post("/app/{app_id}/dynamic/custom")
+async def act_dynamic_custom(app_id: str, request: Request, _: None = Depends(require_auth)):
+    """Run one dynamic pass injecting exactly the user-selected dylibs."""
+    row = _app_or_404(app_id)
+    form = await request.form()
+    dylib_ids = form.getlist("dylibs")
+    aliased = form.get("aliased") == "on"
+    if not dylib_ids:
+        raise HTTPException(status_code=400, detail="select at least one dylib")
+
+    def job(ctx):
+        from ... import device, dynamic
+        with tee_pipeline_logs(ctx):
+            ctx.log(f"injecting: {', '.join(dylib_ids)} (aliased={aliased})\n")
+            driver = device.default_driver()
+            run = dynamic.run_custom(get_db(), row, driver, list(dylib_ids), aliased=aliased)
+            ctx.log(f"outcome: hosts={len(run.hosts)} crashed={run.crashed} "
+                    f"reached_network={run.reached_network}\n")
+
+    jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True,
+                                    params={"dylibs": list(dylib_ids), "aliased": aliased})
     return _watch(request, app_id, jid, "dynamic")
 
 

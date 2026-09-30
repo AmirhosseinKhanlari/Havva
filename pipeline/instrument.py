@@ -72,6 +72,42 @@ def config_specs(config: str) -> list[DylibSpec]:
     raise ValueError(f"unknown config: {config}")
 
 
+def dylib_catalog() -> list[dict]:
+    """User-selectable dylibs for the dynamic stage, with on-disk availability."""
+    d = CONFIG.dylibs
+    items = [
+        {"id": "ssks", "label": "SSL Kill Switch 2", "desc": "Certificate-pinning bypass",
+         "source": d.ssks, "alias": d.ssks_alias, "load": "weak", "default": True},
+        {"id": "sideloadfix", "label": "SideloadFix",
+         "desc": "Prevents the re-signed app from crashing (recommended)",
+         "source": d.sideloadfix, "alias": None, "load": "weak", "default": True},
+        {"id": "frida", "label": "Frida Gadget", "desc": "Runtime instrumentation (listens :27042)",
+         "source": d.frida_gadget, "alias": d.frida_alias, "load": "strong",
+         "config_listen": True, "default": False},
+        {"id": "evasion", "label": "EvasionKit", "desc": "Hides injection from anti-tamper / anti-debug",
+         "source": "EvasionKit.dylib", "alias": "libSystemBridge.dylib", "load": "weak", "default": False},
+        {"id": "attest", "label": "AttestObserver", "desc": "Logs App Attest / DeviceCheck API calls",
+         "source": "AttestObserver.dylib", "alias": None, "load": "weak", "default": False},
+    ]
+    for it in items:
+        it["present"] = _dylib_path(it["source"]).exists()
+    return items
+
+
+def custom_specs(selected_ids: list[str], aliased: bool = True) -> list[DylibSpec]:
+    """Build a DylibSpec list from a user-selected set of catalog ids. When
+    `aliased`, dylibs are installed under a disguised name to evade detection."""
+    cat = {it["id"]: it for it in dylib_catalog()}
+    specs = []
+    for sid in selected_ids:
+        it = cat.get(sid)
+        if not it:
+            continue
+        install_as = it["alias"] if (it.get("alias") and (aliased or it["id"] == "evasion")) else it["source"]
+        specs.append(DylibSpec(it["source"], install_as, it["load"], it.get("config_listen", False)))
+    return specs
+
+
 def ensure_pem() -> bool:
     """Make sure a signing PEM exists; export it from the .p12 if needed."""
     s = CONFIG.signing
@@ -131,8 +167,11 @@ def _write_gadget_config(dest: Path) -> None:
     dest.write_text(json.dumps(cfg))
 
 
-def build(app_id: str, decrypted_ipa: str | Path, config: str) -> tuple[bool, str, str]:
-    """Build a signed IPA for `config`. Returns (ok, signed_ipa_path, error)."""
+def build(app_id: str, decrypted_ipa: str | Path, config: str,
+          specs: "list[DylibSpec] | None" = None) -> tuple[bool, str, str]:
+    """Build a signed IPA for `config`. If `specs` is given, inject exactly those
+    dylibs (a custom selection) instead of the named config's fixed set.
+    Returns (ok, signed_ipa_path, error)."""
     if not ensure_pem():
         return False, "", "no signing PEM"
     decrypted_ipa = Path(decrypted_ipa)
@@ -160,10 +199,11 @@ def build(app_id: str, decrypted_ipa: str | Path, config: str) -> tuple[bool, st
     fw = app_dir / "Frameworks"
     fw.mkdir(exist_ok=True)
 
-    try:
-        specs = config_specs(config)
-    except ValueError as e:
-        return False, "", str(e)
+    if specs is None:
+        try:
+            specs = config_specs(config)
+        except ValueError as e:
+            return False, "", str(e)
 
     for spec in specs:
         src = _dylib_path(spec.source)

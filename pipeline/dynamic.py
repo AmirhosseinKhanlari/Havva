@@ -39,9 +39,10 @@ class ConfigRun:
 
 
 def run_config(app_id: str, bundle_id: str, decrypted_ipa: str, config: str,
-               driver: device.UIDriver) -> ConfigRun:
-    """Build + install + drive + capture one config."""
-    ok, signed, err = instrument.build(app_id, decrypted_ipa, config)
+               driver: device.UIDriver, specs=None) -> ConfigRun:
+    """Build + install + drive + capture one config. If `specs` is given, inject
+    exactly those dylibs (a custom selection)."""
+    ok, signed, err = instrument.build(app_id, decrypted_ipa, config, specs=specs)
     if not ok:
         log.warning("%s build %s failed: %s", app_id, config, err)
         return ConfigRun(config, False, False, CrashClass.NONE, set(), False, "none")
@@ -70,6 +71,29 @@ def run_config(app_id: str, bundle_id: str, decrypted_ipa: str, config: str,
     return ConfigRun(config, ran=dr.launched and not dr.crashed, crashed=dr.crashed,
                      crash_class=crash_class, hosts=hosts, reached_network=reached,
                      login_status=dr.login_status, crash_report=dr.crash_report)
+
+
+def run_custom(db: Database, row, driver: device.UIDriver,
+               dylib_ids: list[str], aliased: bool = True) -> ConfigRun:
+    """Run ONE dynamic pass injecting the user-selected dylibs, record it, and
+    save an outcome. Returns the ConfigRun."""
+    app_id = row["app_id"]
+    bundle_id = row["bundle_id"]
+    ac = db.get_acquisition(app_id)
+    decrypted = ac["ipa_path"] if ac else ""
+    if not decrypted:
+        raise RuntimeError("app not acquired (no decrypted IPA)")
+    specs = instrument.custom_specs(dylib_ids, aliased=aliased)
+    label = "custom:" + ",".join(dylib_ids)
+    run = run_config(app_id, bundle_id, decrypted, label, driver, specs=specs)
+    db.add_dynamic_run(app_id, label, "ran" if run.ran else "fail",
+                       run.crash_class, len(run.hosts), run.login_status)
+    outcome = (Outcome.BYPASSED if run.hosts else
+               Outcome.TAMPER_DETECTED if run.crashed else
+               Outcome.PINNED_UNBYPASSED if run.reached_network else Outcome.INCONCLUSIVE)
+    state = WorkState.POSITIVE if outcome == Outcome.BYPASSED else WorkState.UNTESTED
+    db.save_outcome(app_id, outcome, BypassStage.DYLIB, True, state)
+    return run
 
 
 def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
