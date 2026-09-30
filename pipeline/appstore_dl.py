@@ -145,6 +145,10 @@ def lookup_app_id(bundle_id: str, country: str = "US") -> str | None:
 
 def _clean_store_error(msg: str) -> str:
     low = (msg or "").lower()
+    if "list index out of range" in low or "index out of range" in low:
+        return ("app not available in this Apple account's storefront "
+                "(it is likely region-locked to another country; the iTunes "
+                "server account must match the app's storefront)")
     if "redownload unavailable" in low:
         return ("app is not in this Apple account's library; acquiring it first "
                 "failed (it may be a paid app)")
@@ -184,6 +188,8 @@ def list_versions(app_id: str, server_url: str, limit: int | None = None
         resp = store.download(app_id, "", isRedownload=True)
     except StoreException as e:
         raise RuntimeError(_clean_store_error(str(e.errMsg or e)))
+    except Exception as e:  # noqa: BLE001 - e.g. IndexError from a region-locked app
+        raise RuntimeError(_clean_store_error(str(e)))
     if not resp.songList:
         return []
     ver_ids = list(resp.songList[0].metadata.softwareVersionExternalIdentifiers)
@@ -264,5 +270,5 @@ def download_encrypted(app_id: str, out_dir: str, server_url: str,
         return False, "", _clean_store_error(last_err or "appstore download failed")
     except StoreException as e:
         return False, "", _clean_store_error(str(e.errMsg or e))
-    except Exception as e:  # noqa: BLE001
-        return False, "", str(e)
+    except Exception as e:  # noqa: BLE001 - region-lock IndexError etc.
+        return False, "", _clean_store_error(str(e))
