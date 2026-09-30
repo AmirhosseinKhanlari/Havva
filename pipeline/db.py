@@ -350,6 +350,12 @@ class Database:
 
     # ---- Stage E/F: dynamic runs ---------------------------------------
 
+    def clear_dynamic_runs(self, app_id: str) -> None:
+        """Remove prior dynamic runs for an app so a new run's results replace
+        them (each run of the ladder re-adds stage0 etc., which otherwise piles up)."""
+        with self.connect() as conn:
+            conn.execute("DELETE FROM dynamic_runs WHERE app_id=?", (app_id,))
+
     def add_dynamic_run(self, app_id: str, config: str, install_status: str,
                         crash_class: CrashClass, flows_captured: int,
                         login_status: str, har_path: str = "", error: str = "") -> None:

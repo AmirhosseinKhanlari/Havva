@@ -298,6 +298,14 @@ async def act_dynamic_custom(app_id: str, request: Request, _: None = Depends(re
     return _watch(request, app_id, jid, "dynamic")
 
 
+@router.post("/app/{app_id}/dynamic/clear")
+def act_dynamic_clear(app_id: str, request: Request, _: None = Depends(require_auth)):
+    """Clear this app's dynamic run history, then re-render the Dynamic tab."""
+    get_db().clear_dynamic_runs(app_id)
+    return templates.TemplateResponse(request, "_tab_dynamic.html",
+                                      _tab_context(request, app_id, "dynamic"))
+
+
 @router.post("/app/{app_id}/attest")
 def act_attest(app_id: str, request: Request, _: None = Depends(require_auth)):
     row = _app_or_404(app_id)

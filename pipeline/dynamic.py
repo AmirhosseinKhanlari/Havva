@@ -96,6 +96,7 @@ def run_custom(db: Database, row, driver: device.UIDriver,
     decrypted = ac["ipa_path"] if ac else ""
     if not decrypted:
         raise RuntimeError("app not acquired (no decrypted IPA)")
+    db.clear_dynamic_runs(app_id)
     specs = instrument.custom_specs(dylib_ids, aliased=aliased)
     label = "custom:" + ",".join(dylib_ids)
     run = run_config(app_id, bundle_id, decrypted, label, driver, specs=specs)
@@ -119,6 +120,7 @@ def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
         db.save_outcome(app_id, Outcome.INCONCLUSIVE, BypassStage.NONE, False, WorkState.UNTESTED)
         return Outcome.INCONCLUSIVE
 
+    db.clear_dynamic_runs(app_id)
     per_config: list[tuple[BypassStage, set[str]]] = []
     runs: list[ConfigRun] = []
 
