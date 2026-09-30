@@ -10,6 +10,33 @@ from ..auth import require_auth
 router = APIRouter()
 
 
+def _job_phase(job) -> str:
+    """A friendly current-phase label derived from the job's log tail, so the
+    watch widget shows e.g. Downloading vs Decrypting while a job runs."""
+    if job["state"] == "queued":
+        return "Queued"
+    log = job["log"] or ""
+    # last non-empty token (handle tqdm '\r' progress lines)
+    lines = [seg.strip() for line in log.splitlines() for seg in line.split("\r") if seg.strip()]
+    last = lines[-1] if lines else ""
+    low = last.lower()
+    if low.startswith("==") or "acquire id" in low or "starting" in low:
+        return "Preparing"
+    if "download" in low:
+        return "Downloading from iTunes"
+    if "decrypting on device" in low or "ipadecrypt" in low or "spawned" in low or "running target" in low:
+        return "Decrypting on device"
+    if "installed" in low or "installing" in low:
+        return "Installing on device"
+    if "verifying" in low or "verified" in low or "decrypted" in low:
+        return "Finalizing"
+    if "classif" in low or "pinned=" in low:
+        return "Classifying"
+    if "analyz" in low:
+        return "Analyzing"
+    return (last[:70] if last else "Working")
+
+
 @router.get("/jobs")
 def jobs_page(request: Request, _: None = Depends(require_auth)):
     return templates.TemplateResponse(request, "jobs.html", {"request": request, "jobs": get_db().list_jobs(), "nav": "jobs"})
@@ -46,7 +73,8 @@ def jobs_watch(job_id: int, request: Request, reload: str = "",
                                                    "target": "", "state": "failed",
                                                    "progress_pct": 0}, "reload": reload})
     return templates.TemplateResponse(request, "_job_watch.html",
-                                      {"request": request, "job": job, "reload": reload})
+                                      {"request": request, "job": job, "reload": reload,
+                                       "phase": _job_phase(job)})
 
 
 @router.post("/jobs/{job_id}/cancel")
