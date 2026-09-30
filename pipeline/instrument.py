@@ -205,20 +205,27 @@ def build(app_id: str, decrypted_ipa: str | Path, config: str,
         except ValueError as e:
             return False, "", str(e)
 
+    log.info("unpacked %s (%s)", main_binary.name, info.get("CFBundleIdentifier", "?"))
     for spec in specs:
         src = _dylib_path(spec.source)
         if not src.exists():
+            log.error("dylib not found: %s", spec.source)
             return False, "", f"dylib not found: {spec.source}"
         shutil.copy2(src, fw / spec.install_as)
         if not _inject(main_binary, spec.install_as, spec.load):
+            log.error("inject failed: %s", spec.install_as)
             return False, "", f"inject failed: {spec.install_as}"
+        alias = f" as {spec.install_as}" if spec.install_as != spec.source else ""
+        log.info("  injected %s%s (%s load)", spec.source, alias, spec.load)
         if spec.config_listen:
             # Frida gadget wants its .config in Frameworks/ and the app root.
             stem = Path(spec.install_as).stem
             _write_gadget_config(fw / f"{stem}.config")
             _write_gadget_config(app_dir / f"{stem}.config")
+            log.info("  wrote Frida gadget config (%s.config)", stem)
 
     # Repack.
+    log.info("repacking IPA ...")
     staged_ipa = work.parent / f"{app_id}_{config}.staged.ipa"
     if staged_ipa.exists():
         staged_ipa.unlink()
@@ -234,9 +241,11 @@ def build(app_id: str, decrypted_ipa: str | Path, config: str,
     if out.exists():
         out.unlink()
     s = CONFIG.signing
+    log.info("re-signing with zsign ...")
     p = run_cmd([str(s.zsign), "-k", str(s.pem), "-m", str(s.mobileprovision),
                  "-o", str(out), str(staged_ipa)], timeout=300)
     staged_ipa.unlink(missing_ok=True)
     if out.exists() and out.stat().st_size > 0:
+        log.info("  signed -> %s (%.1f MB)", out.name, out.stat().st_size / (1024 * 1024))
         return True, str(out), ""
     return False, "", f"zsign failed: {(p.stderr or p.stdout)[:300]}"

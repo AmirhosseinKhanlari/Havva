@@ -1,0 +1,38 @@
+{% set terminal = job['state'] in ('done','failed','cancelled') %}
+{% set running = job['state'] in ('running','queued') %}
+{% set indet = running and (job['progress_pct'] or 0) == 0 %}
+<div id="watch-{{ job['id'] }}"
+     {% if not terminal %}hx-get="/jobs/{{ job['id'] }}/watch?reload={{ reload|urlencode }}"
+     hx-trigger="load delay:1.2s" hx-swap="outerHTML"{% endif %}>
+  <div class="glass sm" style="padding:12px 16px;margin-top:6px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      {% if running %}<span class="spinner"></span>{% endif %}
+      <span style="font-size:13px;font-weight:600;text-transform:capitalize">{{ job['kind'] }}</span>
+      {% if running and phase %}<span style="font-size:13px;font-weight:600;color:var(--accent)">{{ phase }}…</span>{% endif %}
+      <span class="mono muted" style="font-size:12px">{{ job['target'] }}</span>
+      <span class="state {{ job['state'] }}" style="margin-left:auto">{{ job['state'] }}</span>
+    </div>
+    {% if job['kind'] in ('acquire','full') and running %}
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      {% set dl = phase in ('Downloading from iTunes',) %}
+      {% set dc = phase in ('Decrypting on device','Installing on device','Finalizing') %}
+      <span class="badge" style="{% if dl %}background:rgba(10,132,255,.16);color:var(--accent){% elif dc or job['progress_pct']==100 %}background:rgba(48,209,150,.16);color:var(--ok){% else %}background:var(--field){% endif %}">1 · Download{% if dc %} ✓{% endif %}</span>
+      <span class="badge" style="{% if dc %}background:rgba(10,132,255,.16);color:var(--accent){% else %}background:var(--field){% endif %}">2 · Decrypt</span>
+    </div>
+    {% endif %}
+    <div style="display:flex;align-items:center;gap:12px">
+      <div class="track {% if indet %}indet{% endif %}" style="flex:1">
+        <i {% if not indet %}style="width:{{ job['progress_pct'] }}%"{% endif %}></i></div>
+      <span style="font-size:12px;font-weight:600;width:52px;text-align:right;color:var(--ink2)">
+        {%- if indet %}working{% else %}{{ job['progress_pct'] }}%{% endif -%}</span>
+    </div>
+  </div>
+  {% if terminal %}
+  <script>(function(){
+    try{ if(window.Notification && Notification.permission==='granted'){
+      new Notification('Havva — {{ job['kind'] }} {{ job['state'] }}', {body:'{{ job['target'] }}'});
+    }}catch(e){}
+    {% if reload %}setTimeout(function(){ try{ htmx.ajax('GET','{{ reload|safe }}',{target:'#tab-content',swap:'innerHTML'}); }catch(e){} }, 3500);{% endif %}
+  })();</script>
+  {% endif %}
+</div>

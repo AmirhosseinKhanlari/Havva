@@ -42,20 +42,24 @@ def run_config(app_id: str, bundle_id: str, decrypted_ipa: str, config: str,
                driver: device.UIDriver, specs=None) -> ConfigRun:
     """Build + install + drive + capture one config. If `specs` is given, inject
     exactly those dylibs (a custom selection)."""
+    log.info("[%s] building instrumented IPA", config)
     ok, signed, err = instrument.build(app_id, decrypted_ipa, config, specs=specs)
     if not ok:
         log.warning("%s build %s failed: %s", app_id, config, err)
         return ConfigRun(config, False, False, CrashClass.NONE, set(), False, "none")
 
+    log.info("installing on device ...")
     installed, ierr = device.install_ipa(signed)
     if not installed:
         log.warning("%s install %s failed: %s", app_id, config, ierr)
         return ConfigRun(config, False, False, CrashClass.UNKNOWN, set(), False, "none")
+    log.info("  installed")
 
     capture.check_connection()
     capture.clear_session()
 
     creds = None  # supplied per app by attestation/auth stage when available
+    log.info("launching + driving app for %ss (capturing traffic) ...", CONFIG.runtime.monitor_seconds)
     dr = driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=bool(creds))
 
     har_path = CONFIG.paths.results_dir / f"{app_id}_{config}.har"
@@ -64,9 +68,18 @@ def run_config(app_id: str, bundle_id: str, decrypted_ipa: str, config: str,
     flows = capture.har_to_flows(har, CONFIG.test_device.client_ip)
     hosts = capture.app_hosts(flows)
     reached = capture.reached_any_network(flows)
+    if dr.crashed:
+        log.info("  app crashed on launch (possible tamper detection)")
+    elif hosts:
+        log.info("  captured %d app host(s): %s", len(hosts), ", ".join(sorted(hosts)[:6]))
+    elif reached:
+        log.info("  reached network but no plaintext hosts (still pinned?)")
+    else:
+        log.info("  no traffic captured")
 
     crash_class = escalate.classify_crash(dr.crash_report, dr.launched, reached)
     device.uninstall(bundle_id)
+    log.info("  uninstalled")
 
     return ConfigRun(config, ran=dr.launched and not dr.crashed, crashed=dr.crashed,
                      crash_class=crash_class, hosts=hosts, reached_network=reached,

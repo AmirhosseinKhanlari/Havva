@@ -67,12 +67,10 @@ def jobs_watch(job_id: int, request: Request, reload: str = "",
     stops polling and (client-side) reloads `reload` into #tab-content + notifies."""
     job = get_db().get_job(job_id)
     if not job:
-        return templates.TemplateResponse(request, "_job_watch.html",
-                                          {"request": request,
-                                           "job": {"id": job_id, "kind": "job",
-                                                   "target": "", "state": "failed",
-                                                   "progress_pct": 0}, "reload": reload})
-    return templates.TemplateResponse(request, "_job_watch.html",
+        job = {"id": job_id, "kind": "job", "target": "", "state": "failed",
+               "progress_pct": 0, "log": ""}
+    # The poll updates only the status bar; the log console (in _job_watch) persists.
+    return templates.TemplateResponse(request, "_job_status.html",
                                       {"request": request, "job": job, "reload": reload,
                                        "phase": _job_phase(job)})
 

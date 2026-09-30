@@ -133,7 +133,8 @@ class _CtxLogHandler(logging.Handler):
 
 
 _PIPELINE_LOGGERS = ("acquire", "analysis", "dynamic", "attestation", "appstore",
-                     "static", "iap", "crawl", "aggregate", "attest_detect")
+                     "static", "iap", "crawl", "aggregate", "attest_detect",
+                     "instrument", "device", "capture")
 
 
 @contextmanager

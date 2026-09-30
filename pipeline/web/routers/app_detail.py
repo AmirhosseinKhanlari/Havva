@@ -131,11 +131,13 @@ def app_tab(app_id: str, tab: str, request: Request, _: None = Depends(require_a
 # ---- actions (each submits a job) ----
 
 def _watch(request: Request, app_id: str, job_id: int, tab: str):
-    """Render the live job-watch widget that self-polls and, on completion,
-    reloads the given tab into #tab-content and fires a browser notification."""
+    """Render the live job-watch widget (log console + polling status) that, on
+    completion, reloads the given tab and fires a browser notification."""
+    from .jobs import _job_phase
+    job = get_db().get_job(job_id)
     return templates.TemplateResponse(request, "_job_watch.html", {
-        "request": request, "job": get_db().get_job(job_id),
-        "reload": f"/app/{app_id}/tab/{tab}"})
+        "request": request, "job": job, "reload": f"/app/{app_id}/tab/{tab}",
+        "phase": _job_phase(job) if job else ""})
 
 @router.post("/app/{app_id}/acquire")
 def act_acquire(app_id: str, request: Request, version: str = Form(default=""),
