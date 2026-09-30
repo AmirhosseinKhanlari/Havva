@@ -103,7 +103,7 @@ def _decode_analysis(row) -> dict:
     out = {}
     for k in ("info_plist", "entitlements", "ats", "frameworks", "sdks",
               "secrets", "file_tree", "crypto_hints", "binary_protections",
-              "insecure_apis", "binary_type", "security_score"):
+              "insecure_apis", "binary_type", "security_score", "trackers"):
         try:
             out[k] = json.loads(row[k]) if row[k] else None
         except Exception:

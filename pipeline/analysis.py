@@ -132,6 +132,40 @@ _API_RULES = [
 _EMAIL_RE = re.compile(rb"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _DOMAIN_RE = re.compile(rb"\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b")
 
+# Tracker / analytics / attribution endpoints (Exodus-style, extended from the
+# subscription paper). domain substring -> tracker name. Catches SDKs by the
+# hosts they phone home to, independent of static linking.
+_TRACKER_DOMAINS = {
+    "revenuecat.com": "RevenueCat", "adapty.io": "Adapty", "superwall.com": "Superwall",
+    "qonversion.io": "Qonversion", "purchasely.com": "Purchasely",
+    "admob.com": "Google AdMob", "doubleclick.net": "Google DoubleClick",
+    "googleadservices.com": "Google Ads", "googlesyndication.com": "Google AdSense",
+    "googletagmanager.com": "Google Tag Manager", "google-analytics.com": "Google Analytics",
+    "firebaseio.com": "Firebase", "firebase.google.com": "Firebase",
+    "crashlytics.com": "Crashlytics", "app-measurement.com": "Firebase Analytics",
+    "adjust.com": "Adjust", "adjust.io": "Adjust", "adjust.net.in": "Adjust",
+    "appsflyer.com": "AppsFlyer", "branch.io": "Branch", "app.link": "Branch",
+    "singular.net": "Singular", "tenjin.com": "Tenjin", "kochava.com": "Kochava",
+    "amplitude.com": "Amplitude", "mixpanel.com": "Mixpanel", "segment.com": "Segment",
+    "segment.io": "Segment", "posthog.com": "PostHog", "heap.io": "Heap",
+    "heapanalytics.com": "Heap", "flurry.com": "Flurry", "localytics.com": "Localytics",
+    "leanplum.com": "Leanplum", "braze.com": "Braze", "appboy.com": "Braze",
+    "onesignal.com": "OneSignal", "clevertap.com": "CleverTap", "iterable.com": "Iterable",
+    "pushwoosh.com": "Pushwoosh", "urbanairship.com": "Airship", "moengage.com": "MoEngage",
+    "sentry.io": "Sentry", "bugsnag.com": "Bugsnag", "newrelic.com": "New Relic",
+    "nr-data.net": "New Relic", "datadoghq.com": "Datadog", "instabug.com": "Instabug",
+    "intercom.io": "Intercom", "zendesk.com": "Zendesk",
+    "facebook.com": "Facebook", "facebook.net": "Facebook", "fbcdn.net": "Facebook",
+    "chartboost.com": "Chartboost", "inmobi.com": "InMobi", "ironsrc.com": "ironSource",
+    "mopub.com": "MoPub", "applovin.com": "AppLovin", "vungle.com": "Vungle",
+    "adcolony.com": "AdColony", "tapjoy.com": "Tapjoy", "fyber.com": "Fyber",
+    "unity3d.com": "Unity", "bytedance.com": "ByteDance/Pangle", "pangle.io": "Pangle",
+    "scorecardresearch.com": "Comscore", "omtrdc.net": "Adobe Analytics",
+    "demdex.net": "Adobe Audience", "amazon-adsystem.com": "Amazon Ads",
+    "stripe.com": "Stripe", "launchdarkly.com": "LaunchDarkly", "optimizely.com": "Optimizely",
+    "split.io": "Split",
+}
+
 # Secret/endpoint patterns: (label, regex, severity).
 _SECRET_PATTERNS = [
     ("AWS access key", re.compile(rb"AKIA[0-9A-Z]{16}"), "high"),
@@ -346,6 +380,23 @@ def emails_domains(strings_blob: bytes) -> dict:
     return {"emails": emails, "domains": domains}
 
 
+def detect_trackers(secrets: dict) -> list[dict]:
+    """Match extracted URLs/domains against the known-tracker list. Returns
+    [{name, domain}], one per detected tracker (deduped by name)."""
+    hosts = set(secrets.get("domains") or [])
+    for u in secrets.get("urls") or []:
+        m = re.search(r"https?://([^/:?#]+)", u)
+        if m:
+            hosts.add(m.group(1).lower())
+    found = {}
+    for host in hosts:
+        for dom, name in _TRACKER_DOMAINS.items():
+            if host == dom or host.endswith("." + dom):
+                found.setdefault(name, dom)
+    return sorted(({"name": n, "domain": d} for n, d in found.items()),
+                  key=lambda x: x["name"])
+
+
 def security_score(report: dict) -> dict:
     """Roll findings into a 0-100 score + letter grade with itemized deductions."""
     score = 100
@@ -424,7 +475,7 @@ def analyze_ipa(ipa_path: str) -> dict:
                     "frameworks": {}, "sdks": [], "secrets": {},
                     "file_tree": [], "crypto_hints": [],
                     "binary_protections": {}, "insecure_apis": [],
-                    "binary_type": "unknown", "security_score": {}}
+                    "binary_type": "unknown", "security_score": {}, "trackers": []}
     tmp = Path(tempfile.mkdtemp(prefix="havva-analysis-"))
     try:
         with zipfile.ZipFile(ipa_path) as zf:
@@ -455,6 +506,7 @@ def analyze_ipa(ipa_path: str) -> dict:
             result["binary_protections"] = _safe(checksec, bin_path)
             result["insecure_apis"] = _safe(insecure_apis, blob)
             result["binary_type"] = binary_type(result["frameworks"], blob)
+            result["trackers"] = detect_trackers(result["secrets"])
             result["security_score"] = security_score(result)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

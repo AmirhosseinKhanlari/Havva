@@ -200,7 +200,8 @@ class Database:
             conn.executescript(SCHEMA)
         # additive columns for existing DBs (analysis deep-scan fields)
         for col, decl in (("binary_protections", "TEXT"), ("insecure_apis", "TEXT"),
-                          ("binary_type", "TEXT"), ("security_score", "TEXT")):
+                          ("binary_type", "TEXT"), ("security_score", "TEXT"),
+                          ("trackers", "TEXT")):
             self.add_column_if_missing("analysis", col, decl)
         self.add_column_if_missing("static_profile", "appattest_level", "TEXT DEFAULT 'none'")
 
@@ -557,7 +558,7 @@ class Database:
     def save_analysis(self, app_id: str, data: dict) -> None:
         cols = ("info_plist", "entitlements", "ats", "frameworks", "sdks",
                 "secrets", "file_tree", "crypto_hints", "binary_protections",
-                "insecure_apis", "binary_type", "security_score")
+                "insecure_apis", "binary_type", "security_score", "trackers")
         vals = [json.dumps(data.get(c)) for c in cols]
         with self.connect() as conn:
             conn.execute(
