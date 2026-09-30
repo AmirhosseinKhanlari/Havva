@@ -182,10 +182,11 @@ def build(app_id: str, decrypted_ipa: str | Path, config: str) -> tuple[bool, st
     staged_ipa = work.parent / f"{app_id}_{config}.staged.ipa"
     if staged_ipa.exists():
         staged_ipa.unlink()
-    shutil.make_archive(str(staged_ipa.with_suffix("")), "zip", work)
-    packed = staged_ipa.with_suffix(".ipa.zip")
-    if packed.exists():
-        packed.rename(staged_ipa)
+    # make_archive returns the actual archive path it created (e.g. ...staged.zip);
+    # use it directly rather than guessing the name.
+    made = Path(shutil.make_archive(str(staged_ipa.with_suffix("")), "zip", work))
+    if made.resolve() != staged_ipa.resolve():
+        made.replace(staged_ipa)
     shutil.rmtree(work, ignore_errors=True)
 
     # Re-sign.
