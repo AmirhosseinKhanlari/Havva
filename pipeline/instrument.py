@@ -80,14 +80,14 @@ def dylib_catalog() -> list[dict]:
          "source": d.ssks, "alias": d.ssks_alias, "load": "weak", "default": True},
         {"id": "sideloadfix", "label": "SideloadFix",
          "desc": "Prevents the re-signed app from crashing (recommended)",
-         "source": d.sideloadfix, "alias": None, "load": "weak", "default": True},
+         "source": d.sideloadfix, "alias": "libMobileBridge.dylib", "load": "weak", "default": True},
         {"id": "frida", "label": "Frida Gadget", "desc": "Runtime instrumentation (listens :27042)",
          "source": d.frida_gadget, "alias": d.frida_alias, "load": "strong",
          "config_listen": True, "default": False},
         {"id": "evasion", "label": "EvasionKit", "desc": "Hides injection from anti-tamper / anti-debug",
          "source": "EvasionKit.dylib", "alias": "libSystemBridge.dylib", "load": "weak", "default": False},
         {"id": "attest", "label": "AttestObserver", "desc": "Logs App Attest / DeviceCheck API calls",
-         "source": "AttestObserver.dylib", "alias": None, "load": "weak", "default": False},
+         "source": "AttestObserver.dylib", "alias": "libServiceBridge.dylib", "load": "weak", "default": False},
     ]
     for it in items:
         it["present"] = _dylib_path(it["source"]).exists()
