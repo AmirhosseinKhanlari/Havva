@@ -1,9 +1,104 @@
-<div class="hlist">
-  {% if attestation %}
-  <div class="glass sm" style="padding:15px 18px"><div class="muted" style="font-size:11.5px">Enforcement</div>
-    <div style="font-size:18px;font-weight:700">{{ attestation['backend_behavior'] or '-' }}</div>
-    <div class="muted" style="font-size:12px;margin-top:4px">tested: {{ attestation['tested_flag'] }} · neutralized: {{ attestation['neutralized_flag'] }}{% if attestation['error'] %} · {{ attestation['error'][:120] }}{% endif %}</div></div>
-  {% else %}<p class="muted" style="font-size:14px">Not tested yet. Requires the XR + results/accounts.json (test accounts).</p>{% endif %}
-  <button class="pill primary" style="align-self:flex-start" hx-post="/app/{{ app_id }}/attest" hx-target="#att-action" hx-swap="innerHTML" hx-confirm="Run the attestation enforcement probe?">Run enforcement probe</button>
-  <div id="att-action"></div>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+  <h3 style="margin:0;font-size:15px;font-weight:700">App Attest &amp; DeviceCheck usage</h3>
+  <div class="ctrlbar">
+    <label class="switch" title="Keep the app installed and drive it yourself while the observer streams calls">
+      <input type="checkbox" name="manual" value="1" id="manual-toggle">
+      <span class="track"><span class="thumb"></span></span>
+      <span class="slabel">Manual mode</span>
+    </label>
+    <span class="winwrap" id="winwrap" style="display:none">
+      <span class="muted" style="font-size:12px">window</span>
+      <input type="number" name="seconds" value="300" min="30" max="1800" class="numin">
+      <span class="muted" style="font-size:12px">s</span>
+    </span>
+    <button class="pill small primary" hx-post="/app/{{ app_id }}/attest-detect" hx-include="[name='manual'],[name='seconds']" hx-target="#att-action" hx-swap="innerHTML" hx-confirm="Run the App Attest usage detector?">Run usage detection</button>
+  </div>
 </div>
+<script>(function(){
+  var m=document.getElementById('manual-toggle'), w=document.getElementById('winwrap');
+  if(!m||!w||m.dataset.init) return; m.dataset.init='1';
+  function upd(){ w.style.display = m.checked ? 'inline-flex' : 'none'; }
+  m.addEventListener('change', upd); upd();
+})();</script>
+
+{% if attest_usage %}
+<div class="banner" style="margin-bottom:14px">
+  <div class="row1">
+    <span class="bdot" style="background:{% if attest_usage['used'] %}var(--accent){% else %}var(--ink3){% endif %};box-shadow:0 0 14px {% if attest_usage['used'] %}var(--accent){% else %}transparent{% endif %}"></span>
+    <span class="btitle">{{ attest_usage['summary'] }}</span>
+  </div>
+  <div class="ink2" style="margin-top:8px;padding-left:22px;font-size:13.5px">{{ attest_usage['detail'] }}</div>
+</div>
+
+<section class="tiles" style="margin-bottom:14px">
+  <div class="glass sm" style="padding:14px 16px"><div class="muted" style="font-size:11.5px;margin-bottom:5px">App Attest</div><div style="font-size:15px;font-weight:700;color:{{ attest_usage['aa_color'] }}">{{ attest_usage['aa_status'] }}</div></div>
+  <div class="glass sm" style="padding:14px 16px"><div class="muted" style="font-size:11.5px;margin-bottom:5px">DeviceCheck</div><div style="font-size:15px;font-weight:700;color:{{ attest_usage['dc_color'] }}">{{ attest_usage['dc_status'] }}</div></div>
+  <div class="glass sm" style="padding:14px 16px"><div class="muted" style="font-size:11.5px;margin-bottom:5px">Confidence</div><div style="font-size:15px;font-weight:600;text-transform:capitalize">{{ attest_usage['confidence'].replace('_',' ') }}</div></div>
+  <div class="glass sm" style="padding:14px 16px"><div class="muted" style="font-size:11.5px;margin-bottom:5px">Detector reliable</div><div style="font-size:15px;font-weight:600;color:{% if attest_usage['tooling_ok'] %}var(--ok){% else %}var(--warn){% endif %}">{{ 'Yes' if attest_usage['tooling_ok'] else 'Unconfirmed' }}</div></div>
+  <div class="glass sm" style="padding:14px 16px"><div class="muted" style="font-size:11.5px;margin-bottom:5px">Attested endpoint</div><div style="font-size:14px;font-weight:600" class="mono">{{ attest_usage['endpoint'] or '—' }}</div></div>
+</section>
+
+{% if attest_usage['calls_table'] %}
+<details class="card" style="margin-bottom:14px" open>
+  <summary><span class="caret">›</span>Detected attestation calls <span class="muted" style="font-weight:500">({{ attest_usage['calls_table']|length }})</span></summary>
+  <div class="dbody">
+    <table class="dtable">
+      <thead><tr><th>Framework</th><th>Function</th><th>Hooked</th><th>Called at runtime</th></tr></thead>
+      <tbody>
+      {% for c in attest_usage['calls_table'] %}
+        <tr>
+          <td>{% if c['api']=='App Attest' %}<span class="badge att">App Attest</span>{% else %}<span class="badge">{{ c['api'] }}</span>{% endif %}</td>
+          <td class="mono">{{ c['function'] }}</td>
+          <td>{% if c['hooked'] %}<span style="color:var(--ok)">yes</span>{% else %}<span class="muted">no</span>{% endif %}</td>
+          <td>{% if c['called'] %}<span class="badge" style="color:var(--accent);background:rgba(10,132,255,.16)">CALLED</span>{% else %}<span class="muted">not observed</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
+<details class="card" style="margin-bottom:14px" {% if attest_usage['requests'] %}open{% endif %}>
+  <summary><span class="caret">›</span>Related network requests <span class="muted" style="font-weight:500">({{ attest_usage['requests']|length }})</span></summary>
+  <div class="dbody">
+    {% if attest_usage['requests'] %}
+    <table class="dtable">
+      <thead><tr><th>Host</th><th>Method</th><th>Request</th><th>Status</th><th>Signal</th></tr></thead>
+      <tbody>
+      {% for r in attest_usage['requests'] %}
+        <tr>
+          <td class="mono">{{ r['host'] }}</td>
+          <td>{{ r['method'] }}</td>
+          <td class="mono cellwrap" title="{{ r['url'] }}">{{ r['url'] }}</td>
+          <td><span style="color:{% if 200 <= r['status'] < 300 %}var(--ok){% elif r['status'] >= 400 %}var(--bad){% else %}var(--ink2){% endif %}">{{ r['status'] }}</span></td>
+          <td><span class="badge mono">{{ r['signal'] }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted" style="font-size:12.5px;margin:0">No request carried an attestation token (header or body scan). The token may go to an excluded host, or Proxyman was not capturing this traffic.</p>
+    {% endif %}
+  </div>
+</details>
+{% else %}
+<p class="muted" style="font-size:14px;margin-bottom:18px">Not run yet. This watches whether the app actually calls App Attest / DeviceCheck while it runs (observe-only). It does not test whether the server enforces it.</p>
+{% endif %}
+
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 14px;flex-wrap:wrap">
+  <h3 style="margin:0;font-size:15px;font-weight:700">Server enforcement</h3>
+  <button class="pill small primary" hx-post="/app/{{ app_id }}/attest" hx-target="#att-action" hx-swap="innerHTML" hx-confirm="Run the attestation enforcement probe?">Run enforcement probe</button>
+</div>
+{% if attestation %}
+<div class="banner {% if attestation['backend_behavior']=='fail_open' %}hit{% endif %}" style="margin-bottom:12px">
+  <div class="row1">
+    <span class="bdot" style="background:{% if attestation['backend_behavior']=='fail_closed' %}var(--ok){% elif attestation['backend_behavior']=='fail_open' %}var(--bad){% else %}var(--ink3){% endif %}"></span>
+    <span class="btitle" style="text-transform:capitalize">{{ (attestation['backend_behavior'] or 'inconclusive').replace('_',' ') }}</span>
+  </div>
+  <div class="muted" style="margin-top:8px;padding-left:22px;font-size:12.5px">tested: {{ attestation['tested_flag'] }} · neutralized: {{ attestation['neutralized_flag'] }}{% if attestation['error'] %} · {{ attestation['error'][:140] }}{% endif %}</div>
+</div>
+{% else %}
+<p class="muted" style="font-size:14px">Not tested yet. Requires the XR + results/accounts.json (test accounts).</p>
+{% endif %}
+<div id="att-action"></div>

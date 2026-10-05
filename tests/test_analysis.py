@@ -1,7 +1,10 @@
+import os
 import plistlib
 import tempfile
 import zipfile
 from pathlib import Path
+
+os.environ.setdefault("CVE_LOOKUP", "0")  # keep analysis tests offline (no OSV calls)
 
 from pipeline.analysis import analyze_ipa, analyze_one
 from pipeline.db import Database

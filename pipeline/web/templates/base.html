@@ -44,5 +44,42 @@
     {% block content %}{% endblock %}
   </div>
   {% block nav %}{% include "_nav.html" %}{% endblock %}
+
+  <!-- Custom confirm modal: replaces the native browser confirm for every hx-confirm -->
+  <div class="cmodal-overlay" id="cmodal" aria-hidden="true">
+    <div class="glass cmodal" role="dialog" aria-modal="true" aria-labelledby="cmodal-title">
+      <div class="cmodal-title" id="cmodal-title">Confirm</div>
+      <div class="cmodal-msg" id="cmodal-msg"></div>
+      <div class="cmodal-actions">
+        <button type="button" class="pill" id="cmodal-cancel">Cancel</button>
+        <button type="button" class="pill primary" id="cmodal-ok">Continue</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function(){
+      var overlay=document.getElementById('cmodal'),
+          msg=document.getElementById('cmodal-msg'),
+          ok=document.getElementById('cmodal-ok'),
+          cancel=document.getElementById('cmodal-cancel'),
+          pending=null;
+      function close(){overlay.classList.remove('show');overlay.setAttribute('aria-hidden','true');pending=null;}
+      function open(text,cb){msg.textContent=text;pending=cb;overlay.classList.add('show');
+        overlay.setAttribute('aria-hidden','false');setTimeout(function(){ok.focus();},30);}
+      ok.addEventListener('click',function(){var p=pending;close();if(p)p();});
+      cancel.addEventListener('click',close);
+      overlay.addEventListener('click',function(e){if(e.target===overlay)close();});
+      document.addEventListener('keydown',function(e){
+        if(!overlay.classList.contains('show'))return;
+        if(e.key==='Escape')close();
+        else if(e.key==='Enter'){var p=pending;close();if(p)p();}});
+      // Intercept htmx's confirmation so it uses our modal instead of window.confirm.
+      document.body.addEventListener('htmx:confirm',function(e){
+        if(!e.detail.question)return;      // no hx-confirm on this element -> proceed
+        e.preventDefault();
+        open(e.detail.question,function(){e.detail.issueRequest(true);});
+      });
+    })();
+  </script>
 </body>
 </html>

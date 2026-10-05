@@ -12,6 +12,7 @@ import base64
 import gzip
 import json
 import time
+import zipfile
 import zlib
 from pathlib import Path
 from urllib.parse import urlparse
@@ -130,3 +131,104 @@ def load_har(path: str | Path) -> dict:
         return json.loads(Path(path).read_text())
     except (OSError, ValueError):
         return {}
+
+
+# ---- Native session (ConnectionTraces) --------------------------------------
+# HAR/raw only hold DECRYPTED transactions. Proxyman's native .proxymansession
+# is a zip whose ConnectionTraces/trace_* record every connection's TLS
+# handshake -- including ones that never decrypted (tunneled / client-aborted).
+# That is the only export that reveals a host the app reached but whose pinning
+# defeated our MITM, so it is how we catch pinning that a bypass can't break.
+
+
+def export_session(path: Path, retries: int = 3) -> Path | None:
+    """Export the current session in native (.proxymansession) format. Proxyman
+    appends a version suffix (e.g. 'v2'), so return the file it actually wrote."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _written() -> Path | None:
+        if path.exists() and path.stat().st_size > 0:
+            return path
+        hits = sorted(path.parent.glob(path.name + "*"))
+        hits = [h for h in hits if h.stat().st_size > 0]
+        return hits[-1] if hits else None
+
+    for _ in range(retries):
+        run_cmd([_cli(), "export-log", "-f", "proxymansession", "-o", str(path)], timeout=30)
+        got = _written()
+        if got:
+            return got
+        time.sleep(1)
+    return _written()
+
+
+def _classify_trace(trace: dict) -> tuple[str, str]:
+    """Classify one ConnectionTrace -> (host, outcome). Outcomes:
+      decrypted  : TLS MITM handshake completed -> we saw plaintext.
+      pinned     : TCP connected + TLS started, but the client aborted the
+                   handshake before completion (no DNS/connect failure) ->
+                   the app rejected our CA (pinning our MITM couldn't break).
+      unresolved : DNS could not resolve the host (dead / sinkholed endpoint).
+      connect_failed : reached DNS but never established a TCP connection.
+      unknown    : none of the above.
+    """
+    host = (trace.get("resolvedHost") or trace.get("host") or "").lower()
+    events = trace.get("events", []) or []
+    kinds = [e.get("kind") for e in events]
+    details = " ".join(str(e.get("detail", "")) for e in events).lower()
+
+    tls_complete = "tlsComplete" in kinds
+    tls_started = "tlsMessage" in kinds
+    connected = "connected" in kinds
+    had_error = "error" in kinds
+    dns_failed = ("resolve" in details or "dns error" in details) and not connected
+
+    if not host:
+        return "", "unknown"
+    if tls_complete:
+        return host, "decrypted"
+    if dns_failed:
+        return host, "unresolved"
+    if connected and tls_started and not tls_complete:
+        # TLS negotiation began against our cert and was torn down first.
+        return host, "pinned"
+    if not connected and had_error:
+        return host, "connect_failed"
+    return host, "unknown"
+
+
+def parse_session(path: str | Path) -> list[tuple[str, str]]:
+    """Read a .proxymansession zip -> [(host, outcome), ...] per connection."""
+    out: list[tuple[str, str]] = []
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = [n for n in z.namelist() if "ConnectionTraces/trace_" in n]
+            for n in names:
+                try:
+                    trace = json.loads(z.read(n))
+                except (ValueError, OSError):
+                    continue
+                host, outcome = _classify_trace(trace)
+                if host:
+                    out.append((host, outcome))
+    except (zipfile.BadZipFile, OSError):
+        return []
+    return out
+
+
+def session_host_outcomes(path: str | Path,
+                          excluded: list[str] | None = None) -> dict[str, str]:
+    """Aggregate per-host outcome across a session's connections. A host with
+    any decrypted connection is 'decrypted'; else 'pinned' if any connection was
+    a pinning abort; else 'unresolved'/'connect_failed'/'unknown'. Excluded
+    (Apple/CDN) hosts are dropped -- they are tunneled by our exclude list, not
+    pinned by the app."""
+    priority = {"decrypted": 4, "pinned": 3, "connect_failed": 2,
+                "unresolved": 1, "unknown": 0}
+    best: dict[str, str] = {}
+    for host, outcome in parse_session(path):
+        if is_excluded(host, excluded):
+            continue
+        if host not in best or priority[outcome] > priority[best[host]]:
+            best[host] = outcome
+    return best

@@ -1,8 +1,11 @@
+{% if not acquired %}
+{% include "_acquire_first.html" %}
+{% else %}
 <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px">
   <h3 style="margin:0;font-size:15px;font-weight:700">SSL pinning &amp; client defenses</h3>
   <button class="pill small primary" hx-post="/app/{{ app_id }}/classify" hx-target="#cls-action" hx-swap="innerHTML">Run classifier</button>
 </div>
-<span id="cls-action"></span>
+<span id="cls-action">{% if active_job and active_job['kind']=='static' %}{% with job=active_job, phase=active_phase, reload=active_reload %}{% include "_job_watch.html" %}{% endwith %}{% endif %}</span>
 
 {% if profile %}
 <div class="banner {% if profile['pins_flag'] %}hit{% endif %}" style="margin-bottom:14px">
@@ -56,7 +59,7 @@
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
   <h3 style="margin:0;font-size:15px;font-weight:700">Deep analysis</h3>
   <button class="pill small primary" hx-post="/app/{{ app_id }}/analyze" hx-target="#an-action" hx-swap="innerHTML">Run deep analysis</button>
-  <span id="an-action"></span>
+  <span id="an-action">{% if active_job and active_job['kind']=='deep_analyze' %}{% with job=active_job, phase=active_phase, reload=active_reload %}{% include "_job_watch.html" %}{% endwith %}{% endif %}</span>
   {% if analysis %}<span class="mono muted" style="font-size:12px">Analyzed {{ analysis['analyzed_at'] }}</span>{% endif %}
 </div>
 
@@ -87,31 +90,194 @@
 {% endif %}
 
 {% if a['insecure_apis'] %}
-<details class="card" style="margin-bottom:12px"><summary><span class="caret">›</span>Insecure API findings <span class="muted" style="font-weight:500">({{ a['insecure_apis']|length }})</span></summary>
-  <div class="dbody hlist" style="gap:8px">
-    {% for f in a['insecure_apis'] %}
-    <div style="font-size:12.5px">
-      <span class="state {{ 'failed' if f['severity']=='high' else 'running' if f['severity']=='medium' else 'queued' }}">{{ f['severity'] }}</span>
-      <b>{{ f['category'] }}</b> — <span class="mono">{{ f['matches']|join(', ') }}</span>
-    </div>
-    {% endfor %}
+{% set sev_hi = a['insecure_apis']|selectattr('severity','equalto','high')|list|length %}
+{% set sev_md = a['insecure_apis']|selectattr('severity','equalto','medium')|list|length %}
+<details class="card" style="margin-bottom:12px" open><summary><span class="caret">›</span>Insecure API findings <span class="muted" style="font-weight:500">({{ a['insecure_apis']|length }})</span>
+  {% if sev_hi %}<span class="sev high" style="margin-left:8px">{{ sev_hi }} high</span>{% endif %}
+  {% if sev_md %}<span class="sev medium" style="margin-left:6px">{{ sev_md }} medium</span>{% endif %}</summary>
+  <div class="dbody">
+    <table class="dtable">
+      <thead><tr><th>Severity</th><th>Finding</th><th>Evidence</th></tr></thead>
+      <tbody>
+      {% for sev in ['high','medium','low','info'] %}
+        {% for f in a['insecure_apis'] if f['severity']==sev %}
+        <tr>
+          <td><span class="sev {{ sev }}">{{ sev }}</span></td>
+          <td style="font-weight:600;color:var(--ink)">{{ f['category'] }}</td>
+          <td class="mono evid">{{ f['matches']|join(', ') }}</td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+      </tbody>
+    </table>
   </div>
 </details>
 {% endif %}
 
 <div class="hlist">
-  {% if a['info_plist'] %}<details class="card" open><summary><span class="caret">›</span>Info.plist + permissions</summary>
+  {% if plist %}<details class="card" open><summary><span class="caret">›</span>App identity &amp; permissions
+    {% if plist['permissions'] %}<span class="muted" style="font-weight:500">({{ plist['permissions']|length }} permissions)</span>{% endif %}</summary>
     <div class="dbody">
-      {% for k,v in (a['info_plist'].get('summary') or {}).items() %}<div style="font-size:12.5px;margin-bottom:4px"><span class="mono muted">{{ k }}:</span> {{ v }}</div>{% endfor %}
-      {% for k,v in (a['info_plist'].get('permissions') or {}).items() %}<div style="font-size:12.5px;color:#FF9F0A;margin-bottom:4px"><b>{{ k }}:</b> {{ v }}</div>{% endfor %}
+      {% if plist['identity'] %}
+      <div class="kvgrid" style="margin-bottom:14px">
+        {% for label,val in plist['identity'] %}
+        <div><div class="k">{{ label }}</div><div class="v mono">{{ val }}</div></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if plist['bg_modes'] %}
+      <div style="margin-bottom:12px"><div class="k" style="margin-bottom:6px">Background modes</div>
+        <div class="chips">{% for m in plist['bg_modes'] %}<span class="badge">{{ m }}</span>{% endfor %}</div></div>
+      {% endif %}
+
+      {% if plist['url_schemes'] %}
+      <div style="margin-bottom:12px"><div class="k" style="margin-bottom:6px">URL schemes it registers</div>
+        <div class="chips">{% for s in plist['url_schemes'] %}<span class="badge mono att">{{ s }}</span>{% endfor %}</div></div>
+      {% endif %}
+
+      {% if plist['query_schemes'] %}
+      <details style="margin-bottom:12px"><summary class="k" style="cursor:pointer;margin-bottom:6px">Apps it can query ({{ plist['query_schemes']|length }})</summary>
+        <div class="chips" style="margin-top:6px">{% for s in plist['query_schemes'] %}<span class="badge mono">{{ s }}</span>{% endfor %}</div></details>
+      {% endif %}
+
+      {% if plist['permissions'] %}
+      <div class="k" style="margin:4px 0 8px">Privacy permissions requested</div>
+      <div class="permgrid">
+        {% for p in plist['permissions'] %}
+        <div class="permcard">
+          <div class="pname"><span class="pico">{{ p['icon'] }}</span>{{ p['name'] }}</div>
+          <div class="pdesc">{{ p['desc'] }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div></details>{% endif %}
-  {% if a['ats'] %}<details class="card"><summary><span class="caret">›</span>App Transport Security</summary><pre class="dbody" style="font-size:11.5px;color:var(--ink2)">{{ a['ats'] }}</pre></details>{% endif %}
+  {% if a['ats'] %}{% set t = a['ats'] %}
+  <details class="card" {% if t.get('allows_arbitrary_loads') %}open{% endif %}><summary><span class="caret">›</span>App Transport Security
+    {% if not t.get('present') %}<span class="muted" style="font-weight:500">(default, enforced)</span>
+    {% elif t.get('allows_arbitrary_loads') %}<span style="font-weight:600;color:var(--bad)">(disabled globally)</span>
+    {% else %}<span style="font-weight:600;color:var(--ok)">(enabled)</span>{% endif %}</summary>
+    <div class="dbody">
+      {% if not t.get('present') %}
+      <div class="muted" style="font-size:12.5px">No <span class="mono">NSAppTransportSecurity</span> dictionary. The app uses Apple's default ATS (TLS 1.2+, forward secrecy). This is the secure default.</div>
+      {% else %}
+      <section class="tiles">
+        {% for label, key in [('Arbitrary loads','allows_arbitrary_loads'),('Media loads','allows_arbitrary_loads_media'),('Web-content loads','allows_arbitrary_loads_web'),('Local networking','allows_local_networking')] %}
+        {% set v = t.get(key) %}
+        {% set risky = v and key != 'allows_local_networking' %}
+        <div class="glass sm" style="padding:12px 14px">
+          <div class="muted" style="font-size:11.5px;margin-bottom:4px">{{ label }}</div>
+          <div style="font-size:14px;font-weight:700;color:{% if risky %}var(--bad){% elif v %}var(--ink2){% else %}var(--ok){% endif %}">{{ 'allowed' if v else 'blocked' }}</div>
+        </div>
+        {% endfor %}
+      </section>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:12.5px">
+        <span>Exception domains: <b>{{ t.get('exception_domains')|length }}</b></span>
+        <span>Pinned domains (NSPinnedDomains): <b style="color:{{ 'var(--ok)' if t.get('pinned_domains') else 'var(--ink3)' }}">{{ t.get('pinned_domains')|length }}</b></span>
+      </div>
+      {% if t.get('allows_arbitrary_loads') %}<div class="muted" style="font-size:11.5px;margin-top:8px">ATS is disabled globally: the app permits cleartext and weak-TLS to any host. Run the ATS gap check below to see how much of this weakening is actually needed.</div>{% endif %}
+      {% endif %}
+    </div>
+  </details>{% endif %}
   {% if a['entitlements'] %}<details class="card"><summary><span class="caret">›</span>Entitlements</summary><div class="dbody">{% for k,v in a['entitlements'].items() %}<div class="mono" style="font-size:12px;margin-bottom:4px"><span style="color:var(--accent)">{{ k }}</span> = {{ v }}</div>{% endfor %}</div></details>{% endif %}
   {% if a['sdks'] or a['frameworks'] %}<details class="card"><summary><span class="caret">›</span>Frameworks &amp; SDKs</summary><div class="dbody"><div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px">{% for s in a['sdks'] %}<span class="badge mono">{{ s }}</span>{% endfor %}</div><div class="muted" style="font-size:12px">Embedded: {{ (a['frameworks'].get('embedded') or [])|join(', ') }}</div></div></details>{% endif %}
+  {% if a['dependencies'] %}
+  {% set vuln_deps = a['dependencies']|selectattr('cves')|list %}
+  <details class="card" {% if vuln_deps %}open{% endif %}><summary><span class="caret">›</span>Dependencies &amp; known CVEs <span class="muted" style="font-weight:500">({{ a['dependencies']|length }} deps{% if vuln_deps %}, <span style="color:var(--bad)">{{ vuln_deps|length }} vulnerable</span>{% endif %})</span></summary>
+    <div class="dbody">
+      {% for d in a['dependencies']|sort(attribute='cves', reverse=true) %}
+      <div style="padding:7px 0;border-top:1px solid var(--hair);font-size:12.5px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="mono" style="font-weight:600">{{ d['name'] }}</span>
+          <span class="muted mono" style="font-size:11.5px">{{ d['version'] or '—' }}</span>
+          {% if d['cves'] %}<span class="badge" style="background:rgba(255,69,58,.14);color:var(--bad)">{{ d['cves']|length }} CVE{{ 's' if d['cves']|length != 1 }}</span>{% endif %}
+        </div>
+        {% for c in d['cves'] %}
+        <div style="margin:4px 0 0 4px;font-size:11.5px;line-height:1.45">
+          <span class="state {{ 'failed' if c['severity']=='high' else 'running' }}">{{ c['severity'] }}</span>
+          <span class="mono" style="font-weight:600">{{ c['id'] }}</span>{% if c['fixed'] %} <span class="muted">· fixed in {{ c['fixed'] }}</span>{% endif %}
+          <span class="muted" style="display:block;margin-left:2px">{{ c['summary'] }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:10.5px;margin-top:8px">Sources: OSV.dev (SwiftPM) + curated CocoaPods advisories. CocoaPods coverage in public DBs is partial.</div>
+      <a class="pill small" href="/app/{{ app_id }}/sbom" style="margin-top:8px;display:inline-flex">Download SBOM (CycloneDX)</a>
+    </div>
+  </details>
+  {% endif %}
+  {% if a['app_extensions'] %}
+  <details class="card" open><summary><span class="caret">›</span>App extensions <span class="muted" style="font-weight:500">({{ a['app_extensions']|length }})</span></summary>
+    <div class="dbody" style="font-size:12.5px">
+      <div class="muted" style="margin-bottom:6px">Bundled .appex extensions (share, widget, keyboard, network, etc.). Extensions often skip the main app's pinning/attest defenses, so they are a separate attack surface.</div>
+      {% for e in a['app_extensions'] %}
+      <div style="padding:5px 0;border-top:1px solid var(--hair)">
+        <span style="font-weight:600">{{ e['type'] }}</span>
+        <span class="mono muted" style="font-size:11.5px;display:block;word-break:break-all">{{ e['bundle_id'] }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </details>{% endif %}
   {% if a['trackers'] %}<details class="card"><summary><span class="caret">›</span>Trackers <span class="muted" style="font-weight:500">({{ a['trackers']|length }})</span></summary>
     <div class="dbody"><div style="display:flex;flex-wrap:wrap;gap:7px">
       {% for t in a['trackers'] %}<span class="badge" style="background:rgba(255,159,10,.14);color:var(--warn)" title="{{ t['domain'] }}">{{ t['name'] }}</span>{% endfor %}
     </div></div></details>{% endif %}
+  {% if a['privacy_manifest'] %}{% set pm = a['privacy_manifest'] %}
+  <details class="card"><summary><span class="caret">›</span>Privacy manifest <span class="muted" style="font-weight:500">({% if pm['present'] %}present{% else %}<span style="color:var(--warn)">app manifest missing</span>{% endif %}{% if pm['sdk_manifests'] %}, {{ pm['sdk_manifests'] }} SDK{% endif %})</span></summary>
+    <div class="dbody" style="font-size:12.5px">
+      <div style="margin-bottom:6px">Tracking: <b style="color:{{ 'var(--warn)' if pm['tracking'] else 'var(--ok)' }}">{{ 'yes' if pm['tracking'] else 'no' }}</b></div>
+      {% if pm['tracking_domains'] %}<div class="muted" style="margin-bottom:4px">Tracking domains</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">{% for d in pm['tracking_domains'] %}<span class="badge mono" style="background:rgba(255,159,10,.14);color:var(--warn)">{{ d }}</span>{% endfor %}</div>{% endif %}
+      {% if pm['collected_data_types'] %}<div class="muted" style="margin-bottom:4px">Collected data types</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">{% for d in pm['collected_data_types'] %}<span class="badge mono">{{ d }}</span>{% endfor %}</div>{% endif %}
+      {% if pm['accessed_api_types'] %}<div class="muted" style="margin-bottom:4px">Required-reason APIs</div><div style="display:flex;flex-wrap:wrap;gap:6px">{% for d in pm['accessed_api_types'] %}<span class="badge mono">{{ d }}</span>{% endfor %}</div>{% endif %}
+    </div>
+  </details>{% endif %}
+  {% if a['ats'] and a['ats'].get('exception_details') %}
+  <details class="card"><summary><span class="caret">›</span>ATS exceptions <span class="muted" style="font-weight:500">({{ a['ats']['exception_details']|length }} domain{{ 's' if a['ats']['exception_details']|length != 1 }})</span></summary>
+    <div class="dbody" style="font-size:12px">
+      {% if a['ats'].get('allows_arbitrary_loads') %}<div style="color:var(--bad);font-weight:600;margin-bottom:6px">⚠ NSAllowsArbitraryLoads — ATS disabled globally (cleartext allowed)</div>{% endif %}
+      {% for d in a['ats']['exception_details'] %}
+      <div style="padding:5px 0;border-top:1px solid var(--hair)">
+        <span class="mono" style="font-weight:600">{{ d['domain'] }}</span>
+        {% if d['insecure_http'] %}<span class="badge" style="background:rgba(255,69,58,.14);color:var(--bad)">insecure HTTP</span>{% endif %}
+        <span class="badge {% if d['min_tls'] in ('TLSv1.0','TLSv1.1') %}" style="background:rgba(255,69,58,.14);color:var(--bad)"{% else %}mono"{% endif %}>min {{ d['min_tls'] }}</span>
+        {% if not d['forward_secrecy'] %}<span class="badge" style="background:rgba(255,159,10,.14);color:var(--warn)">no forward secrecy</span>{% endif %}
+        {% if d['includes_subdomains'] %}<span class="badge mono">+subdomains</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </details>{% endif %}
+  <details class="card" {% if a['ats_gap'] and a['ats_gap'].get('n_unnecessary') %}open{% endif %}><summary><span class="caret">›</span>ATS declared-vs-needed gap
+    {% if a['ats_gap'] and a['ats_gap'].get('checked') %}<span class="muted" style="font-weight:500">({{ a['ats_gap']['verdict']|replace('_',' ') }})</span>{% endif %}</summary>
+    <div class="dbody" style="font-size:12.5px">
+      <div class="muted" style="margin-bottom:8px">Runs <span class="mono">nscurl --ats-diagnostics</span> against each endpoint to see whether it already meets Apple's default ATS. Weakening ATS for an endpoint that passes anyway is unnecessary (MASTG-TECH-0149).</div>
+      <div style="background:var(--field);border:1px solid var(--field-brd);border-radius:12px;padding:10px 12px;margin-bottom:10px;font-size:11.5px;line-height:1.55">
+        <div style="font-weight:700;margin-bottom:4px">What the result means</div>
+        <div style="margin-bottom:5px"><b>Default ATS = </b>TLS 1.2+ · forward secrecy (ECDHE) · valid modern cert (SHA-256, RSA-2048/ECC-256, trusted). For public endpoints this is a low bar most already clear.</div>
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <span><span style="color:var(--ok);font-weight:700">pass</span>: meets default ATS, so any weakening for it was <b>unnecessary</b>.</span>
+          <span><span style="color:var(--warn);font-weight:700">fail</span>: does not meet it (legacy TLS / weak cipher / cert issue), so an exception is <b>justified</b> (and the endpoint itself is weak).</span>
+          <span><span class="muted" style="font-weight:700">?</span>: unreachable at check time; no verdict.</span>
+        </div>
+        <div class="muted" style="margin-top:5px;font-style:italic">Measures the server's TLS posture only, not certificate pinning. A “pass” server can still be MITM'd if the app does not pin.</div>
+      </div>
+      <button class="pill small primary" hx-post="/app/{{ app_id }}/ats-gap" hx-target="#ats-action" hx-swap="innerHTML" hx-confirm="Run nscurl ATS diagnostics against this app's endpoints? (can take a minute)">Check ATS gap</button>
+      <span id="ats-action"></span>
+      {% if a['ats_gap'] and a['ats_gap'].get('checked') %}
+      <div style="margin-top:10px">
+        {% if a['ats_gap']['n_unnecessary'] %}<div style="color:var(--bad);font-weight:600;margin-bottom:6px">{{ a['ats_gap']['n_unnecessary'] }} unnecessary weakening(s) — {{ a['ats_gap']['n_pass_default'] }}/{{ a['ats_gap']['n_tested'] }} endpoints already pass default ATS</div>{% else %}<div class="muted" style="margin-bottom:6px">{{ a['ats_gap']['n_pass_default'] }}/{{ a['ats_gap']['n_tested'] }} endpoints pass default ATS; no unnecessary weakening found.</div>{% endif %}
+        {% for d in a['ats_gap']['domains'] %}
+        <div class="mono" style="font-size:11.5px">{% if d['default_ats_pass'] is none %}<span class="muted">?</span>{% elif d['default_ats_pass'] %}<span style="color:var(--ok)">pass</span>{% else %}<span style="color:var(--warn)">fail</span>{% endif %} · {{ d['domain'] }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </details>
+  {% if a['bundled_certs'] %}<details class="card" open><summary><span class="caret">›</span>Bundled certificates <span class="muted" style="font-weight:500">({{ a['bundled_certs']|length }})</span></summary>
+    <div class="dbody" style="font-size:12px">
+      <div class="muted" style="margin-bottom:6px">Cert/key files shipped in the bundle — a pinning-by-cert signal. These can be swapped with the MITM CA in the dynamic probe (cert-swap option).</div>
+      {% for c in a['bundled_certs'] %}<div class="mono ink2" style="font-size:11.5px">{{ c }}</div>{% endfor %}
+    </div></details>{% endif %}
   {% if a['crypto_hints'] %}<details class="card"><summary><span class="caret">›</span>Crypto / API usage</summary><div class="dbody mono ink2" style="font-size:12.5px">{{ a['crypto_hints']|join(', ') }}</div></details>{% endif %}
   {% if a['secrets'] %}<details class="card"><summary><span class="caret">›</span>Secrets &amp; URLs <span class="muted" style="font-weight:500">({{ (a['secrets'].get('findings') or [])|length }})</span></summary>
     <div class="dbody">
@@ -126,4 +292,5 @@
   {% if a['file_tree'] %}<details class="card"><summary><span class="caret">›</span>File tree <span class="muted" style="font-weight:500">({{ a['file_tree']|length }})</span></summary>
     <div class="dbody" style="max-height:280px;overflow:auto">{% for f in a['file_tree'][:200] %}<div class="mono ink2" style="font-size:11.5px;white-space:nowrap"><span class="muted" style="display:inline-block;width:74px">{{ (f['size']/1024)|round(1) }} KB</span>{{ f['path'] }}</div>{% endfor %}</div></details>{% endif %}
 </div>
+{% endif %}
 {% endif %}

@@ -47,8 +47,21 @@ PROBES: list[tuple[str, Path | None]] = [
 ]
 
 # Request headers that plausibly carry an attestation assertion/token.
-_ASSERT_HEADER_RE = re.compile(r"assert|attest|integrity|device-?check|app-?check|x-.*token",
-                               re.IGNORECASE)
+# Attestation-specific wording, matched in request HEADERS and BODY (NOT a generic
+# x-.*token, which matches auth/session/CSRF tokens). See attest_detect for rationale.
+_ASSERT_HEADER_RE = re.compile(
+    r"attest|assert|integrity|device[-_]?check|app[-_]?check|approov|client[-_]?data[-_]?hash",
+    re.IGNORECASE)
+
+
+def _req_carries_assertion(f) -> bool:
+    """True if the request headers or body carry attestation wording."""
+    if any(_ASSERT_HEADER_RE.search(h) for h in (f.request_headers or [])):
+        return True
+    body = f.request_body or ""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    return bool(body and _ASSERT_HEADER_RE.search(body[:4000]))
 
 
 def load_accounts() -> dict[str, dict[str, str]]:
@@ -61,8 +74,15 @@ def load_accounts() -> dict[str, dict[str, str]]:
         return {}
 
 
+def creds_for(accounts: dict, app_id: str, bundle_id: str = "") -> dict | None:
+    """Pick credentials for an app: a specific app_id or bundle_id entry wins,
+    else the wildcard default ('*' or 'default') applies to every app."""
+    return (accounts.get(app_id) or accounts.get(bundle_id or "")
+            or accounts.get("*") or accounts.get("default"))
+
+
 def _creds_for(row, accounts: dict) -> dict[str, str] | None:
-    return accounts.get(row["app_id"]) or accounts.get(row["bundle_id"] or "")
+    return creds_for(accounts, row["app_id"], row["bundle_id"] or "")
 
 
 def _served_gated_data(flows: list) -> bool:
@@ -89,7 +109,7 @@ def _coverage(flows: list) -> tuple[int, int]:
             continue
         seen.add(key)
         gated += 1
-        if any(_ASSERT_HEADER_RE.search(h) for h in f.request_headers):
+        if _req_carries_assertion(f):
             attested += 1
     return gated, attested
 

@@ -38,8 +38,9 @@ _download_sess = requests.Session()
 _download_sess.headers = {"User-Agent": CONFIGURATOR_UA}
 
 
-def _download_file(url: str, outfile: str, retries: int = 6) -> None:
-    """Stream a URL to disk, verifying the full Content-Length."""
+def _download_file(url: str, outfile: str, retries: int = 6, progress_cb=None) -> None:
+    """Stream a URL to disk, verifying the full Content-Length. `progress_cb(pct)`
+    is called with the integer download percentage (for the web UI bar)."""
     last = None
     for attempt in range(retries):
         try:
@@ -49,6 +50,7 @@ def _download_file(url: str, outfile: str, retries: int = 6) -> None:
                 if not total:
                     raise RuntimeError("server returned no Content-Length")
                 got = 0
+                last_pct = -1
                 bar = tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024,
                            desc="  download", file=sys.stderr, leave=False) if tqdm else None
                 with open(outfile, "wb") as f:
@@ -58,6 +60,14 @@ def _download_file(url: str, outfile: str, retries: int = 6) -> None:
                             got += len(chunk)
                             if bar:
                                 bar.update(len(chunk))
+                            if progress_cb:
+                                pct = int(got * 100 / total)
+                                if pct != last_pct:
+                                    last_pct = pct
+                                    try:
+                                        progress_cb(pct)
+                                    except Exception:  # noqa: BLE001
+                                        pass
                 if bar:
                     bar.close()
                 if got != total:
@@ -221,8 +231,8 @@ def resolve_version(app_id: str, short_or_verid: str, server_url: str) -> str | 
 
 
 def download_encrypted(app_id: str, out_dir: str, server_url: str,
-                       country: str = "US", app_ver_id: str | None = None
-                       ) -> tuple[bool, str, str]:
+                       country: str = "US", app_ver_id: str | None = None,
+                       progress_cb=None) -> tuple[bool, str, str]:
     """Download the still-encrypted IPA for a numeric app id via the iTunes
     server. Returns (ok, path, error). The .sinf license is embedded so the
     iPhone 8 can decrypt it afterwards.
@@ -241,7 +251,7 @@ def download_encrypted(app_id: str, out_dir: str, server_url: str,
         ver = info.metadata.bundleShortVersionString
         path = os.path.join(out_dir, f"{bundle}-v{ver}-{info.songId}.ipa")
         log.info("  appstore: downloading %s (%s) via iTunes server ...", bundle, ver)
-        _download_file(info.URL, path)
+        _download_file(info.URL, path, progress_cb=progress_cb)
         _embed_sinf_and_metadata(path, info)
         log.info("  appstore: got %.1f MB -> %s",
                  os.path.getsize(path) / (1024 * 1024), os.path.basename(path))
@@ -256,17 +266,24 @@ def download_encrypted(app_id: str, out_dir: str, server_url: str,
             resp = store.download(app_id, app_ver_id, isRedownload=True)
             return True, _save(resp), ""
 
-        # Current build: acquire (STDQ), fall back to redownload if already owned.
+        # Current build: acquire (STDQ) first, then redownload (STDRDL). A
+        # first-time free app's acquire response carries NO songList (it's a
+        # purchase ack, not a download), so we must fall through to the
+        # redownload pass in the SAME run rather than failing.
         last_err = ""
         for is_redownload in (False, True):
             try:
                 resp = store.download(app_id, "", isRedownload=is_redownload)
-                return True, _save(resp), ""
             except StoreException as e:
                 last_err = str(e.errMsg or e)
                 if any(m in last_err.lower() for m in ("purchased", "license", "owned")):
-                    continue
+                    continue  # already owned -> go to the redownload pass
                 return False, "", _clean_store_error(last_err)
+            if not resp.songList:
+                # Acquired the license but got no download; redownload for the files.
+                last_err = "no songList (acquired; redownloading)"
+                continue
+            return True, _save(resp), ""
         return False, "", _clean_store_error(last_err or "appstore download failed")
     except StoreException as e:
         return False, "", _clean_store_error(str(e.errMsg or e))

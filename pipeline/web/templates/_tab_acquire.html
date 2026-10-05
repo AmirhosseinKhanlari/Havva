@@ -34,5 +34,5 @@
     <span id="ver-spin" class="htmx-indicator muted" style="font-size:12px"><span class="spinner"></span> loading versions…</span>
   </div>
   <div id="versions"></div>
-  <div id="acq-action"></div>
+  <div id="acq-action">{% if active_job %}{% with job=active_job, phase=active_phase, reload=active_reload %}{% include "_job_watch.html" %}{% endwith %}{% endif %}</div>
 </div>

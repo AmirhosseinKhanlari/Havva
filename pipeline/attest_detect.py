@@ -24,8 +24,27 @@ from .util import get_logger
 
 log = get_logger("attest_detect", CONFIG.paths.log_dir)
 
-_ASSERT_HEADER_RE = re.compile(r"assert|attest|integrity|device-?check|app-?check|x-.*token",
-                               re.IGNORECASE)
+# Attestation-specific wording, matched in request HEADERS and BODY. Deliberately
+# NOT a generic `x-.*token` (that matches auth/session/CSRF tokens). Catches
+# X-Attestation/X-App-Attest/attestationObject (attest), X-Assertion/assertion
+# (assert), X-Firebase-AppCheck/appCheckToken (app-check), X-Integrity-Token
+# (integrity), DeviceCheck, clientDataHash, Approov.
+_ASSERT_HEADER_RE = re.compile(
+    r"attest|assert|integrity|device[-_]?check|app[-_]?check|approov|client[-_]?data[-_]?hash",
+    re.IGNORECASE)
+
+
+def _flow_attest_hits(f) -> list[str]:
+    """Where an attestation signal matched on a flow: the matching request header
+    name(s), and/or 'body' if the request body carries the wording."""
+    hits = [h.split(":", 1)[0].strip() for h in (f.request_headers or [])
+            if _ASSERT_HEADER_RE.search(h)]
+    body = f.request_body or ""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    if body and _ASSERT_HEADER_RE.search(body[:4000]):
+        hits.append("body")
+    return hits
 _CALL_RE = re.compile(r"CALL (\S+) (\S+)")
 _VERIFIED_RE = re.compile(r"HOOK_VERIFIED (\S+)")
 _FAILED_RE = re.compile(r"HOOK_FAILED (\S+)")
@@ -76,43 +95,78 @@ def classify_confidence(entitlement: bool, symbols: bool,
 
 def _endpoint_found(flows: list) -> str:
     for f in flows:
-        if f.host and not capture.is_excluded(f.host):
-            if any(_ASSERT_HEADER_RE.search(h) for h in f.request_headers):
-                return f.host
+        if f.host and not capture.is_excluded(f.host) and _flow_attest_hits(f):
+            return f.host
     return ""
 
 
+def _attest_requests(flows: list) -> list[dict]:
+    """Every captured request that carries an attestation-looking signal (header
+    or body), with details for the UI table. `signal` names where it matched."""
+    out: list[dict] = []
+    for f in flows:
+        if not f.host or capture.is_excluded(f.host):
+            continue
+        hits = _flow_attest_hits(f)
+        if not hits:
+            continue
+        out.append({
+            "host": f.host,
+            "method": getattr(f, "method", "") or "",
+            "url": (f.url or "")[:200],
+            "status": f.status,
+            "signal": ", ".join(sorted(set(hits))[:4]),
+        })
+        if len(out) >= 50:
+            break
+    return out
+
+
 def observe(app_id: str, bundle_id: str, decrypted: str,
-            creds: dict | None) -> tuple[Trail, str]:
-    """Inject the observer, run the app while streaming syslog, parse the trail."""
+            creds: dict | None, manual: bool = False,
+            manual_seconds: int = 300, log_cb=None, stop_check=None) -> tuple[Trail, str, list]:
+    """Inject the observer, run the app while streaming syslog, parse the trail.
+
+    manual=True: launch the app and capture the observer trail for `manual_seconds`
+    while the human drives the UI by hand (no Appium), and leave the app INSTALLED
+    afterwards so interaction can continue. manual=False: Appium-driven, then
+    uninstall (the automated window-gated path)."""
     ok, signed, err = instrument.build(app_id, decrypted, "attest_observe")
     if not ok:
         log.warning("%s observe build failed: %s", app_id, err)
-        return Trail(), ""
+        return Trail(), "", []
     installed, ierr = device.install_ipa(signed)
     if not installed:
         log.warning("%s observe install failed: %s", app_id, ierr)
-        return Trail(), ""
+        return Trail(), "", []
 
     capture.check_connection()
     capture.clear_session()
 
-    driver = device.AppiumDriver(credentials=creds or {})
+    if manual:
+        device.launch(bundle_id)  # open it; the human drives from here
+        syslog = device.capture_syslog(seconds=manual_seconds, during=None,
+                                       grep="AttestObserver", on_line=log_cb,
+                                       stop_check=stop_check)
+    else:
+        driver = device.AppiumDriver(credentials=creds or {})
 
-    def during():
-        driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=bool(creds))
+        def during():
+            driver.drive(bundle_id, CONFIG.runtime.monitor_seconds, login=bool(creds))
 
-    syslog = device.capture_syslog(during=during, grep="OBSERVER")
+        syslog = device.capture_syslog(during=during, grep="AttestObserver")
 
     har = CONFIG.paths.results_dir / f"{app_id}_attest_observe.har"
     capture.export_har(har)
     flows = capture.har_to_flows(capture.load_har(har), CONFIG.test_device.client_ip)
-    device.uninstall(bundle_id)
+    if not manual:
+        device.uninstall(bundle_id)  # manual mode keeps the app installed
 
-    return parse_trail(syslog), _endpoint_found(flows)
+    return parse_trail(syslog), _endpoint_found(flows), _attest_requests(flows)
 
 
-def process_app(db: Database, row, accounts: dict) -> AttestConfidence:
+def process_app(db: Database, row, accounts: dict, manual: bool = False,
+                manual_seconds: int = 300, log_cb=None, stop_check=None) -> AttestConfidence:
     app_id, bundle_id = row["app_id"], row["bundle_id"]
     with db.connect() as c:
         st = c.execute("SELECT appattest_flag, matched_patterns FROM static_profile "
@@ -127,23 +181,48 @@ def process_app(db: Database, row, accounts: dict) -> AttestConfidence:
             entitlement = False
     decrypted = ac["ipa_path"] if ac else ""
 
-    trail, endpoint = (Trail(), "")
+    from .attestation import creds_for
+    trail, endpoint, requests = (Trail(), "", [])
     if decrypted:
-        trail, endpoint = observe(app_id, bundle_id, decrypted,
-                                  accounts.get(app_id) or accounts.get(bundle_id or ""))
+        trail, endpoint, requests = observe(app_id, bundle_id, decrypted,
+                                            creds_for(accounts, app_id, bundle_id or ""),
+                                            manual=manual, manual_seconds=manual_seconds, log_cb=log_cb,
+                                            stop_check=stop_check)
 
     conf = classify_confidence(entitlement, symbols, trail.calls, bool(endpoint))
-    _save(db, app_id, conf, trail, endpoint)
+    _save(db, app_id, conf, trail, endpoint, requests)
     status = "ok" if trail.tooling_ok else "TOOLING-UNCONFIRMED"
     log.info("%s attest usage -> %s [%s] calls=%s endpoint=%s",
              app_id, conf.value, status, trail.calls, endpoint or "-")
+
+    if log_cb:
+        aa_calls = [c for c in trail.calls if "DCAppAttestService" in c]
+        dc_calls = [c for c in trail.calls if "DCDevice" in c]
+        aa_present = bool(aa_calls) or any(
+            x in v for v in trail.verified for x in ("attestKey", "generateAssertion", "generateKeyWith"))
+        dc_present = bool(dc_calls) or any("generateToken" in v for v in trail.verified)
+
+        def _sel(calls):
+            return ", ".join(sorted({c.split(" ", 1)[1] for c in calls if " " in c}))
+
+        def _line(name, calls, present):
+            if calls:
+                return f"{name}: actively called ({_sel(calls)})"
+            return f"{name}: present, not observed calling" if present else f"{name}: not detected"
+
+        log_cb("=== usage detection verdict ===\n")
+        log_cb(_line("App Attest", aa_calls, aa_present) + "\n")
+        log_cb(_line("DeviceCheck", dc_calls, dc_present) + "\n")
+        log_cb(f"Attested endpoint (network): {endpoint or 'none found'}\n")
+        log_cb(f"Overall confidence: {conf.value} | detector reliable: {trail.tooling_ok}\n")
     return conf
 
 
-def _save(db: Database, app_id: str, conf: AttestConfidence, trail: Trail, endpoint: str) -> None:
+def _save(db: Database, app_id: str, conf: AttestConfidence, trail: Trail, endpoint: str,
+          requests: list | None = None) -> None:
     for col in ("attest_confidence TEXT", "attest_methods_seen TEXT",
                 "attested_endpoint TEXT", "attest_tooling_ok INTEGER DEFAULT 0",
-                "attest_trail TEXT"):
+                "attest_trail TEXT", "attest_requests TEXT"):
         name, decl = col.split(" ", 1)
         db.add_column_if_missing("static_profile", name, decl)
     trail_json = json.dumps({"loaded": trail.loaded, "class_present": trail.class_present,
@@ -151,9 +230,10 @@ def _save(db: Database, app_id: str, conf: AttestConfidence, trail: Trail, endpo
                              "failed": trail.failed, "calls": trail.calls})
     with db.connect() as c:
         c.execute("UPDATE static_profile SET attest_confidence=?, attest_methods_seen=?, "
-                  "attested_endpoint=?, attest_tooling_ok=?, attest_trail=? WHERE app_id=?",
+                  "attested_endpoint=?, attest_tooling_ok=?, attest_trail=?, attest_requests=? "
+                  "WHERE app_id=?",
                   (conf.value, json.dumps(trail.calls), endpoint,
-                   int(trail.tooling_ok), trail_json, app_id))
+                   int(trail.tooling_ok), trail_json, json.dumps(requests or []), app_id))
 
 
 def run(db: Database, limit: int | None = None) -> dict[str, int]:

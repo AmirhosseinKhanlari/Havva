@@ -2,6 +2,11 @@
 {% block title %}Jobs{% endblock %}
 {% block h1 %}Jobs{% endblock %}
 {% block content %}
+<div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+  <button class="pill small" style="color:var(--bad)"
+          hx-post="/jobs/clear" hx-target="#jobs-table" hx-swap="outerHTML"
+          hx-confirm="Remove all finished jobs? (running jobs are kept)">Clear finished</button>
+</div>
 <div class="section" hx-get="/jobs/list" hx-trigger="every 2s" hx-swap="innerHTML">
   {% include "_job_row.html" %}
 </div>

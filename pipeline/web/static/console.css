@@ -208,3 +208,68 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',ui
 .hitem .hdot i{position:absolute;inset:-4px;border-radius:50%;opacity:.35;animation:pulse 2.4s ease-in-out infinite}
 a{color:var(--accent);text-decoration:none}
 a.link,a.underline{text-decoration:underline}
+
+/* ---- Custom confirm modal (replaces the native browser confirm) ---- */
+.cmodal-overlay{position:fixed;inset:0;z-index:2000;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(6,10,20,.5);backdrop-filter:blur(8px) saturate(160%);-webkit-backdrop-filter:blur(8px) saturate(160%)}
+.cmodal-overlay.show{display:flex}
+.cmodal{width:100%;max-width:360px;padding:22px 22px 18px;background:var(--glass2);animation:cmodal-in .16s cubic-bezier(.2,.9,.3,1)}
+@keyframes cmodal-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
+.cmodal-title{font-size:16px;font-weight:800;margin-bottom:8px;color:var(--ink)}
+.cmodal-msg{font-size:13.5px;line-height:1.5;color:var(--ink2);margin-bottom:18px}
+.cmodal-actions{display:flex;justify-content:flex-end;gap:10px}
+
+/* ---- Collapsible endpoint-pinning card ---- */
+.pin-details > summary{list-style:none}
+.pin-details > summary::-webkit-details-marker{display:none}
+.pin-details > summary::marker{content:""}
+.pin-details .cchev{display:inline-block;font-size:16px;font-weight:700;color:var(--ink3);transition:transform .18s ease;flex:none;width:12px;text-align:center}
+.pin-details[open] .cchev{transform:rotate(90deg)}
+.pin-details > summary:hover .cchev{color:var(--accent)}
+
+/* ---- Per-run expandable row ---- */
+.run-item > summary{list-style:none}
+.run-item > summary::-webkit-details-marker{display:none}
+.run-item > summary::marker{content:""}
+.run-item > summary:hover{background:var(--glass)}
+.run-item .cchev{display:inline-block;font-size:15px;font-weight:700;color:var(--ink3);transition:transform .18s ease;flex:none;width:11px;text-align:center}
+.run-item[open] .cchev{transform:rotate(90deg)}
+.run-item[open] > summary:hover .cchev{color:var(--accent)}
+
+/* ---- Data table (glass-consistent) ---- */
+.dtable{width:100%;border-collapse:collapse;font-size:12.5px}
+.dtable th{text-align:left;padding:9px 14px;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);border-bottom:1px solid var(--hair);white-space:nowrap}
+.dtable td{padding:10px 14px;border-bottom:1px solid var(--hair);color:var(--ink2);vertical-align:middle}
+.dtable tbody tr:last-child td{border-bottom:none}
+.dtable tbody tr:hover{background:var(--field)}
+.dtable .cellwrap{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---- Severity badge (reusable) ---- */
+.sev{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:3px 9px;border-radius:7px;white-space:nowrap}
+.sev.high{color:var(--bad);background:rgba(255,69,58,.14)}
+.sev.medium{color:var(--warn);background:rgba(255,159,10,.14)}
+.sev.low{color:var(--accent);background:rgba(10,132,255,.14)}
+.sev.info{color:var(--ink3);background:var(--field)}
+.dtable td.evid{white-space:normal;word-break:break-word;max-width:520px;color:var(--ink3);font-size:11.5px}
+
+/* ---- Identity key/value grid + permission cards ---- */
+.kvgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:9px 20px}
+.kvgrid .k{font-size:10.5px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--ink3)}
+.kvgrid .v{font-size:12.5px;color:var(--ink);overflow-wrap:anywhere;margin-top:2px}
+.permgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.permcard{padding:12px 14px;border-radius:14px;background:var(--field);border:1px solid var(--field-brd)}
+.permcard .pname{font-size:12.5px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:8px}
+.permcard .pico{font-size:15px;line-height:1}
+.permcard .pdesc{font-size:11.5px;color:var(--ink3);margin-top:6px;line-height:1.5}
+
+/* ---- Control bar: toggle switch + inline number ---- */
+.ctrlbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--field);border:1px solid var(--field-brd);border-radius:14px;padding:6px 8px 6px 14px}
+.switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+.switch input{position:absolute;opacity:0;width:0;height:0}
+.switch .track{width:38px;height:22px;border-radius:999px;background:var(--field-brd);position:relative;transition:background .18s ease;flex:none}
+.switch .thumb{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35);transition:transform .18s ease}
+.switch input:checked + .track{background:var(--accent)}
+.switch input:checked + .track .thumb{transform:translateX(16px)}
+.switch .slabel{font-size:12.5px;font-weight:600;color:var(--ink2)}
+.winwrap{display:inline-flex;align-items:center;gap:6px}
+.numin{width:58px;background:var(--glass);border:1px solid var(--field-brd);border-radius:9px;padding:5px 8px;color:var(--ink);font-size:12.5px;font-family:inherit}
+.numin:focus{outline:none;border-color:var(--accent)}

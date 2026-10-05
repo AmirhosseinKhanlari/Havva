@@ -1,29 +1,266 @@
+{% macro sign_env_select() %}
+<div style="margin-bottom:12px">
+  <div class="muted" style="font-size:11.5px;margin-bottom:6px">Signing environment</div>
+  <label style="display:inline-flex;align-items:center;gap:7px;margin-right:18px">
+    <input type="radio" name="sign_env" value="dev" checked style="width:15px;height:15px;accent-color:var(--accent)">
+    <span style="font-size:12.5px">Development <span class="muted">· devicectl launch</span></span>
+  </label>
+  <label style="display:inline-flex;align-items:center;gap:7px">
+    <input type="radio" name="sign_env" value="dist" style="width:15px;height:15px;accent-color:var(--accent)">
+    <span style="font-size:12.5px">Distribution <span class="muted">· ad-hoc, DVT tunnel</span></span>
+  </label>
+</div>
+{% endmacro %}
+{% macro cert_swap_toggle() %}
+<label style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
+  <input type="checkbox" name="swap_certs" style="width:16px;height:16px;accent-color:var(--accent)">
+  <span style="font-size:12.5px">Swap bundled certificates with the MITM CA <span class="muted">(defeats cert-file pinning; MASTG-TECH-0064)</span></span>
+</label>
+{% endmacro %}
+{% macro monitor_input() %}
+<div style="margin-bottom:12px">
+  <div class="muted" style="font-size:11.5px;margin-bottom:6px">Capture window</div>
+  <label style="display:inline-flex;align-items:center;gap:8px">
+    <input type="number" name="monitor_seconds" value="{{ monitor_default }}" min="3" max="300" step="1"
+           style="width:74px;padding:7px 10px;font-size:13px;border-radius:9px;border:1px solid var(--field-brd);background:var(--field);color:inherit">
+    <span class="muted" style="font-size:12px">seconds to launch + capture per run</span>
+  </label>
+</div>
+{% endmacro %}
 <div class="hlist">
-  {% if outcome %}
-  <div class="glass sm" style="padding:15px 18px"><div class="muted" style="font-size:11.5px">Outcome</div>
-    <div style="font-size:18px;font-weight:700">{{ outcome['label'] if outcome['label'] is defined else outcome['outcome'] }}</div></div>
+  {% if not acquired %}
+  {% include "_acquire_first.html" %}
+  {% else %}
+  <div class="glass sm" style="padding:16px 18px;border:1.5px solid var(--accent)">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:18px">🔒</span>
+      <div style="flex:1">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:15px;font-weight:800">Detect SSL pinning</span>
+          <span class="pill small" style="color:var(--accent);padding:2px 8px;font-size:10px">START HERE</span>
+        </div>
+        <div class="muted" style="font-size:11.5px">The one-click test. Runs two Proxyman passes (clean baseline, then SSL&nbsp;Kill&nbsp;Switch) and reports each endpoint as open, pinned-but-bypassed, or hard-pinned.</div>
+      </div>
+    </div>
+    <form hx-post="/app/{{ app_id }}/dynamic/pinning" hx-target="#dyn-action" hx-swap="innerHTML"
+          hx-confirm="Run two MITM passes on the XR (clean, then SSL Kill Switch) to find pinned endpoints?" style="margin-top:14px">
+      {{ sign_env_select() }}
+      {{ monitor_input() }}
+      <label style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
+        <input type="checkbox" name="aliased" checked style="width:16px;height:16px;accent-color:var(--accent)">
+        <span style="font-size:12.5px">Rename injected dylibs to evade detection</span>
+      </label>
+      {{ cert_swap_toggle() }}
+      <button class="pill primary">▶ Probe for pinning</button>
+    </form>
+  </div>
+
+  {% if pinning %}
+  {% set hard_hosts = pinning|selectattr('verdict','equalto','pinned_hard')|list %}
+  {% set pinned_hosts = pinning|selectattr('verdict','equalto','pinned')|list %}
+  {% set open_hosts = pinning|selectattr('verdict','equalto','not_pinned')|list %}
+  {% set uncertain_hosts = pinning|selectattr('verdict','equalto','uncertain')|list %}
+  {% set dead_hosts = pinning|selectattr('verdict','equalto','unresolved')|list %}
+  <details class="glass sm pin-details" style="overflow:hidden" {% if pinned_hosts or hard_hosts %}open{% endif %}>
+    <summary style="padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer">
+      <span class="cchev" aria-hidden="true">›</span>
+      <span class="muted" style="font-size:11.5px;flex:1;min-width:100px">SSL pinning by endpoint ({{ pinning|length }} host{{ 's' if pinning|length != 1 }})</span>
+      {% if hard_hosts %}<span style="font-size:12px;font-weight:700;color:var(--bad)">{{ hard_hosts|length }} hard-pinned</span>{% endif %}
+      {% if pinned_hosts %}<span style="font-size:12px;font-weight:700;color:var(--warn)">{{ pinned_hosts|length }} pinned</span>{% endif %}
+      <span style="font-size:12px;font-weight:700;color:var(--ok)">{{ open_hosts|length }} not pinned</span>
+    </summary>
+    <div class="muted" style="padding:2px 16px 10px;font-size:10.5px;display:flex;gap:14px;flex-wrap:wrap">
+      <span>👁️ not pinned (traffic visible)</span>
+      <span>🔒 pinned (bypass worked)</span>
+      <span>🛡️ hard-pinned (bypass failed)</span>
+    </div>
+    {% for p in pinning %}
+    {% set v = p['verdict'] %}
+    <div style="display:flex;align-items:center;gap:13px;padding:11px 16px;border-top:1px solid var(--hair);font-size:13px">
+      <span style="font-size:20px;line-height:1;width:24px;text-align:center;flex:none">
+      {%- if v == 'pinned_hard' %}<span title="Pinned - bypass failed">🛡️</span>
+      {%- elif v == 'pinned' %}<span title="Pinned - bypassed by SSL Kill Switch">🔒</span>
+      {%- elif v == 'uncertain' %}<span title="Uncertain" style="color:var(--warn)">❓</span>
+      {%- elif v == 'unresolved' %}<span title="Did not resolve" style="color:var(--muted-fg,#888)">✖️</span>
+      {%- else %}<span title="Not pinned - traffic visible">👁️</span>{% endif -%}
+      </span>
+      <span style="flex:1;font-weight:600;word-break:break-all;{% if v=='unresolved' %}opacity:.6{% endif %}">{{ p['host'] }}</span>
+      <span class="pill small" style="{% if v=='pinned_hard' %}color:var(--bad){% elif v=='pinned' %}color:var(--warn){% elif v=='uncertain' %}color:var(--warn){% elif v=='unresolved' %}color:var(--muted-fg,#888){% else %}color:var(--ok){% endif %}">
+        {% if v=='pinned_hard' %}HARD-PINNED{% elif v=='pinned' %}PINNED{% elif v=='uncertain' %}UNCERTAIN{% elif v=='unresolved' %}no DNS{% else %}not pinned{% endif %}</span>
+    </div>
+    {% endfor %}
+    {% if hard_hosts %}
+    <div class="muted" style="padding:9px 16px;border-top:1px solid var(--hair);font-size:11px">
+      Hard-pinned: the app reached these but tore down TLS against our certificate even with SSL Kill Switch loaded — pinning our MITM could not break (custom pinning / statically-linked TLS).
+    </div>
+    {% endif %}
+    {% if uncertain_hosts %}
+    <div class="muted" style="padding:9px 16px;border-top:1px solid var(--hair);font-size:11px">
+      Uncertain: the clean baseline run did not launch cleanly, so the open/bypassed split could not be confirmed. Re-run the probe.
+    </div>
+    {% endif %}
+  </details>
   {% endif %}
+
+  {% if outcome %}
+  {% set lbl = (outcome['label'] if outcome['label'] is defined else outcome['outcome'])|string %}
+  {% set CONCL = {
+    'not_pinned':        ['👁️','No SSL pinning','None of the endpoints exercised enforce certificate pinning. The traffic is interceptable with a trusted MITM CA alone — no client-side pinning defense.','var(--ok)','rgba(48,209,150,.14)'],
+    'bypassed':          ['🔓','Pinning bypassed','This app pins at least one endpoint, but SSL Kill Switch defeated it. A re-signed client can read and modify the traffic.','var(--warn)','rgba(255,159,10,.14)'],
+    'partial':           ['◐','Partially bypassed','Some pinned endpoints were defeated by the bypass; at least one still held.','var(--warn)','rgba(255,159,10,.14)'],
+    'pinned_unbypassed': ['🛡️','Pinning held','At least one endpoint enforces pinning the bypass could not defeat (hard-pinned) — custom or statically-linked pinning.','var(--bad)','rgba(255,69,58,.14)'],
+    'tamper_detected':   ['⚠️','Tamper detection','The app crashed after re-signing / injection — likely anti-tamper or injection / jailbreak detection.','var(--bad)','rgba(255,69,58,.14)'],
+    'inconclusive':      ['❓','Inconclusive','No clear signal this run. Re-check the device, Proxyman, and that the app launched, then run again.','var(--ink2)','var(--field)'],
+  } %}
+  {% set c = CONCL.get(lbl, ['•', lbl|replace('_',' ')|title, 'Result recorded.', 'var(--ink)', 'var(--field)']) %}
+  <div class="glass sm" style="padding:16px 18px">
+    <div style="display:flex;gap:14px;align-items:flex-start">
+      <div style="width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:23px;background:{{ c[4] }};flex:none">{{ c[0] }}</div>
+      <div style="flex:1;min-width:0">
+        <div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px">Conclusion</div>
+        <div style="font-size:17px;font-weight:800;color:{{ c[3] }};margin-top:1px">{{ c[1] }}</div>
+        <div class="muted" style="font-size:12.5px;line-height:1.55;margin-top:4px">{{ c[2] }}</div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="glass sm" style="padding:15px 18px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:16px">🪪</span>
+      <div style="flex:1">
+        <div style="font-size:14px;font-weight:700">Detect sideload / anti-resign</div>
+        <div class="muted" style="font-size:11.5px">Launches a plain re-sign (control) then a SideloadFix build and compares whether each stays running. If only the SideloadFix build survives, the app detects sideloading.</div>
+      </div>
+    </div>
+    <form hx-post="/app/{{ app_id }}/dynamic/sideload" hx-target="#dyn-action" hx-swap="innerHTML"
+          hx-confirm="Run two quick launches on the XR (plain re-sign, then SideloadFix) to detect anti-resign?" style="margin-top:12px">
+      {{ sign_env_select() }}
+      {{ monitor_input() }}
+      <button class="pill primary">▶ Probe for sideload detection</button>
+    </form>
+  </div>
+
+  {% if sideload %}
+  {% set sv = sideload['verdict'] %}
+  {% set SL = {
+    'detected':     ['🛡️','Detects sideloading','A plain re-sign is blocked; SideloadFix is required to run. The app has an anti-resign / sideload check.','var(--warn)','rgba(255,159,10,.14)'],
+    'no_detection': ['✅','No sideload detection','The app runs even with a plain re-sign — no anti-resign check (SideloadFix not needed).','var(--ok)','rgba(48,209,150,.14)'],
+    'inconclusive': ['❓','Inconclusive','Could not decide — see the note. Re-run, or check build/install.','var(--ink2)','var(--field)'],
+  } %}
+  {% set s = SL.get(sv, ['•', sv|replace('_',' ')|title, sideload['note'], 'var(--ink)', 'var(--field)']) %}
+  <div class="glass sm" style="padding:16px 18px">
+    <div style="display:flex;gap:14px;align-items:flex-start">
+      <div style="width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:23px;background:{{ s[4] }};flex:none">{{ s[0] }}</div>
+      <div style="flex:1;min-width:0">
+        <div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px">Sideload detection</div>
+        <div style="font-size:17px;font-weight:800;color:{{ s[3] }};margin-top:1px">{{ s[1] }}</div>
+        <div class="muted" style="font-size:12.5px;line-height:1.55;margin-top:4px">{{ sideload['note'] or s[2] }}</div>
+        <div class="muted" style="font-size:11px;margin-top:8px;display:flex;gap:16px;flex-wrap:wrap">
+          <span>plain re-sign: {{ 'ran' if sideload['control_alive'] else 'blocked' }}{% if sideload['control_crashed'] %} (crash){% endif %}</span>
+          <span>+SideloadFix: {{ 'ran' if sideload['fix_alive'] else 'blocked' }}{% if sideload['fix_crashed'] %} (crash){% endif %}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="glass sm" style="padding:15px 18px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:16px">🗄️</span>
+      <div style="flex:1">
+        <div style="font-size:14px;font-weight:700">Inspect data storage</div>
+        <div class="muted" style="font-size:11.5px">Runs the app, pulls its container from the device and scans the unencrypted stores (NSUserDefaults, SQLite/Core Data, Realm, cookies, keyboard cache) for secrets and sensitive values. Use Development signing for full-container access.</div>
+      </div>
+    </div>
+    <form hx-post="/app/{{ app_id }}/dynamic/storage" hx-target="#dyn-action" hx-swap="innerHTML"
+          hx-confirm="Run the app on the XR, pull its data container and scan it for insecure storage?" style="margin-top:12px">
+      {{ sign_env_select() }}
+      {{ monitor_input() }}
+      <button class="pill primary">▶ Inspect data storage</button>
+    </form>
+  </div>
+
+  {% if storage %}
+  {% set stv = storage['verdict'] %}
+  {% set STG = {
+    'exposed': ['🔓','Sensitive data exposed','Secrets or sensitive values were found sitting in an unencrypted store.','var(--bad)','rgba(255,69,58,.14)'],
+    'review':  ['🗂️','Unencrypted data stored','Unencrypted stores hold data but no clear secret matched. Review the items below.','var(--warn)','rgba(255,159,10,.14)'],
+    'clean':   ['✅','No exposed storage','No data was found in the inspected unencrypted stores.','var(--ok)','rgba(48,209,150,.14)'],
+    'inconclusive': ['❓','Inconclusive','Could not pull the container (use Development signing). Re-run.','var(--ink2)','var(--field)'],
+  } %}
+  {% set g = STG.get(stv, ['•', stv|replace('_',' ')|title, storage['note'], 'var(--ink)', 'var(--field)']) %}
+  <div class="glass sm" style="overflow:hidden">
+    <div style="display:flex;gap:14px;align-items:flex-start;padding:16px 18px">
+      <div style="width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:23px;background:{{ g[4] }};flex:none">{{ g[0] }}</div>
+      <div style="flex:1;min-width:0">
+        <div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px">Data storage</div>
+        <div style="font-size:17px;font-weight:800;color:{{ g[3] }};margin-top:1px">{{ g[1] }}</div>
+        <div class="muted" style="font-size:12.5px;line-height:1.55;margin-top:4px">{{ storage['note'] or g[2] }}</div>
+        {% if storage['stores'] %}<div class="muted" style="font-size:11px;margin-top:8px;display:flex;gap:14px;flex-wrap:wrap">
+          {% for name, n in storage['stores'].items() %}<span>{{ name }}: {{ n }}</span>{% endfor %}
+        </div>{% endif %}
+      </div>
+    </div>
+    {% if storage['findings'] %}
+    <details class="pin-details">
+      <summary style="padding:11px 16px;border-top:1px solid var(--hair);cursor:pointer;display:flex;align-items:center;gap:9px">
+        <span class="cchev">›</span><span class="muted" style="font-size:11.5px">{{ storage['findings']|length }} item(s)</span>
+      </summary>
+      {% for f in storage['findings'] %}
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:9px 16px;border-top:1px solid var(--hair);font-size:12.5px">
+        <span class="pill small" style="flex:none;padding:1px 8px;font-size:10px;color:{{ 'var(--bad)' if f['severity']=='high' else 'var(--warn)' if f['severity']=='medium' else 'var(--ink3)' }}">{{ f['severity'] }}</span>
+        <span style="flex:1;min-width:0">
+          <span style="font-weight:600">{{ f['type'] }}</span>
+          <span class="muted" style="display:block;font-size:11px;word-break:break-all">{{ f['store'] }} · {{ f['file'] }}{% if f['detail'] %} · {{ f['detail'] }}{% endif %}</span>
+        </span>
+      </div>
+      {% endfor %}
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {% if runs %}
-  <div style="display:flex;align-items:center;justify-content:space-between">
-    <span class="muted" style="font-size:11.5px">Runs ({{ runs|length }})</span>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:-2px">
+    <span class="muted" style="font-size:11.5px">Runs ({{ runs|length }}) · tap a run for its log</span>
     <button class="pill small" style="color:var(--bad)" hx-post="/app/{{ app_id }}/dynamic/clear"
             hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear all dynamic runs for this app?">Clear runs</button>
   </div>
   <div class="glass sm" style="overflow:hidden">
     {% for r in runs %}
-    <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--hair);font-size:13px">
-      <span style="flex:1;font-weight:600">{{ r['config'] }}</span>
-      <span class="muted">{{ r['install_status'] }}</span>
-      <span class="muted">crash: {{ r['crash_class'] }}</span>
-      <span class="muted">hosts: {{ r['host_count'] }}</span>
-    </div>
+    {% set ok = r['install_status'] == 'ran' %}
+    {% set crashed = r['crash_class'] and r['crash_class'] not in ('none','NONE') %}
+    <details class="run-item" style="border-top:1px solid var(--hair)">
+      <summary style="display:flex;align-items:center;gap:11px;padding:12px 16px;cursor:pointer;flex-wrap:wrap">
+        <span class="cchev" aria-hidden="true">›</span>
+        <span style="width:8px;height:8px;border-radius:50%;flex:none;background:{{ 'var(--ok)' if ok and not crashed else 'var(--bad)' if not ok else 'var(--warn)' }}"></span>
+        <span style="flex:1;min-width:110px;font-weight:600;font-size:13px;word-break:break-all">{{ r['config'] }}</span>
+        <span class="pill small" style="color:{{ 'var(--ok)' if ok else 'var(--bad)' }};padding:2px 9px;font-size:10.5px">{{ r['install_status'] }}</span>
+        {% if crashed %}<span style="font-size:11px;font-weight:600;color:var(--warn)">crash: {{ r['crash_class'] }}</span>{% endif %}
+        <span class="muted" style="font-size:11.5px">{{ r['flows_captured'] }} host{{ 's' if r['flows_captured'] != 1 }}</span>
+      </summary>
+      <div style="padding:2px 16px 14px">
+        {% if r['error'] %}<div style="font-size:11.5px;color:var(--bad);margin:2px 0 8px">{{ r['error'] }}</div>{% endif %}
+        {% if r['log'] %}
+        <pre class="logbox done" style="margin-top:4px;white-space:pre-wrap;word-break:break-word;color:var(--ink2)">{{ r['log'] }}</pre>
+        {% else %}
+        <p class="muted" style="font-size:12px;padding:6px 0 0">No log captured for this run.</p>
+        {% endif %}
+        {% if r['run_at'] %}<div class="muted" style="font-size:10.5px;margin-top:8px">ran {{ r['run_at'] }}</div>{% endif %}
+      </div>
+    </details>
     {% endfor %}
   </div>
   {% else %}<p class="muted" style="font-size:14px">No dynamic runs yet. Requires the non-jailbroken XR + Proxyman.</p>{% endif %}
-  <div class="glass sm" style="padding:15px 18px">
-    <div class="muted" style="font-size:11.5px;margin-bottom:8px">Inject dylibs (select)</div>
+  <details class="glass sm" style="padding:15px 18px">
+    <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px">
+      <span style="font-size:13.5px;font-weight:700">Advanced: manual run</span>
+      <span class="muted" style="font-size:11px">— inject specific dylibs for one launch (debugging, not detection)</span>
+    </summary>
     <form hx-post="/app/{{ app_id }}/dynamic/custom" hx-target="#dyn-action" hx-swap="innerHTML"
-          hx-confirm="Build + sign with the selected dylibs and run on the XR?">
+          hx-confirm="Build + sign with the selected dylibs and run on the XR?" style="margin-top:14px">
+      <div class="muted" style="font-size:11.5px;margin-bottom:8px">Inject dylibs (select)</div>
       <div class="hlist" style="gap:8px">
         {% for d in dylibs %}
         <label style="display:flex;align-items:center;gap:11px;{% if not d['present'] %}opacity:.5{% endif %}">
@@ -39,11 +276,15 @@
         <input type="checkbox" name="aliased" checked style="width:16px;height:16px;accent-color:var(--accent)">
         <span style="font-size:12.5px">Rename injected dylibs to evade detection</span>
       </label>
+      <div style="margin-top:12px">{{ sign_env_select() }}</div>
+      {{ monitor_input() }}
+      {{ cert_swap_toggle() }}
       <div style="display:flex;align-items:center;gap:10px;margin-top:12px">
-        <button class="pill primary">Run with selected dylibs</button>
-        <button class="pill small" type="button" hx-post="/app/{{ app_id }}/dynamic" hx-target="#dyn-action" hx-swap="innerHTML" hx-confirm="Run the full auto bypass ladder?">Auto ladder</button>
+        <button class="pill primary">Run once with selected dylibs</button>
+        <button class="pill primary" type="button" hx-post="/app/{{ app_id }}/dynamic" hx-target="#dyn-action" hx-swap="innerHTML" hx-confirm="Run the full auto bypass ladder?">Auto ladder</button>
       </div>
     </form>
-  </div>
-  <div id="dyn-action"></div>
+  </details>
+  <div id="dyn-action">{% if active_job %}{% with job=active_job, phase=active_phase, reload=active_reload %}{% include "_job_watch.html" %}{% endwith %}{% endif %}</div>
+  {% endif %}
 </div>

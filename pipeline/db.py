@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS dynamic_runs (
     login_status TEXT,
     har_path TEXT,
     error TEXT,
+    log TEXT DEFAULT '',
     run_at TEXT
 );
 
@@ -123,6 +124,44 @@ CREATE TABLE IF NOT EXISTS outcome (
     pinned INTEGER DEFAULT 0,
     work_state INTEGER DEFAULT 0,        -- WorkState
     decided_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS iap_bypass (
+    app_id TEXT PRIMARY KEY REFERENCES apps(app_id),
+    verdict TEXT,                        -- bypassable | not_bypassable | inconclusive
+    tamperable INTEGER,
+    fields TEXT, urls TEXT, method TEXT, -- JSON / text from the LLM verdict
+    analysis TEXT, error TEXT,
+    n_iap_flows INTEGER,
+    probed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS storage_probe (
+    app_id TEXT PRIMARY KEY REFERENCES apps(app_id),
+    verdict TEXT,                        -- exposed | review | clean | inconclusive
+    note TEXT,
+    findings TEXT,                       -- JSON list of {store,file,type,severity,detail}
+    stores TEXT,                         -- JSON dict store -> file count
+    probed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sideload_probe (
+    app_id TEXT PRIMARY KEY REFERENCES apps(app_id),
+    verdict TEXT,                        -- detected | no_detection | inconclusive
+    note TEXT,
+    control_alive INTEGER, fix_alive INTEGER,
+    control_crashed INTEGER, fix_crashed INTEGER,
+    probed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pinning_probe (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id TEXT REFERENCES apps(app_id),
+    host TEXT,
+    verdict TEXT,                        -- 'pinned' | 'not_pinned' | 'uncertain'
+    seen_bypass INTEGER DEFAULT 0,       -- decrypted in the SSL-Kill-Switch run
+    seen_clean INTEGER DEFAULT 0,        -- decrypted in the no-bypass run
+    probed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS attestation (
@@ -163,12 +202,19 @@ CREATE TABLE IF NOT EXISTS analysis (
     insecure_apis TEXT,                  -- JSON (banned APIs, weak crypto/hash, random, webview)
     binary_type TEXT,                    -- Swift | Objective-C | unknown
     security_score TEXT,                 -- JSON {score, grade, deductions}
+    trackers TEXT,                       -- JSON
+    dependencies TEXT,                   -- JSON [{name,version,cves:[...]}]
+    privacy_manifest TEXT,               -- JSON
+    bundled_certs TEXT,                  -- JSON list of cert/key files in bundle
+    app_extensions TEXT,                 -- JSON list of .appex extensions
+    ats_gap TEXT,                        -- JSON ATS declared-vs-needed result
     analyzed_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_apps_stage ON apps(stage);
 CREATE INDEX IF NOT EXISTS idx_static_pins ON static_profile(pins_flag);
 CREATE INDEX IF NOT EXISTS idx_dynamic_app ON dynamic_runs(app_id);
+CREATE INDEX IF NOT EXISTS idx_pinning_app ON pinning_probe(app_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 """
 
@@ -201,9 +247,12 @@ class Database:
         # additive columns for existing DBs (analysis deep-scan fields)
         for col, decl in (("binary_protections", "TEXT"), ("insecure_apis", "TEXT"),
                           ("binary_type", "TEXT"), ("security_score", "TEXT"),
-                          ("trackers", "TEXT")):
+                          ("trackers", "TEXT"), ("dependencies", "TEXT"),
+                          ("privacy_manifest", "TEXT"), ("bundled_certs", "TEXT"),
+                          ("app_extensions", "TEXT"), ("ats_gap", "TEXT")):
             self.add_column_if_missing("analysis", col, decl)
         self.add_column_if_missing("static_profile", "appattest_level", "TEXT DEFAULT 'none'")
+        self.add_column_if_missing("dynamic_runs", "log", "TEXT DEFAULT ''")
 
     def add_column_if_missing(self, table: str, column: str, decl: str) -> None:
         """The paper-1 `ensure_rc_columns` idiom: additive migration."""
@@ -229,10 +278,13 @@ class Database:
             fields = {k: v for k, v in fields.items() if k in valid}
             exists = conn.execute("SELECT 1 FROM apps WHERE app_id=?", (app_id,)).fetchone()
             if exists:
-                if fields:
-                    sets = ", ".join(f"{k}=?" for k in fields)
+                # Never overwrite an existing value with NULL (e.g. a numeric
+                # acquire passes bundle_id=None; that must not clobber a resolved id).
+                upd = {k: v for k, v in fields.items() if v is not None}
+                if upd:
+                    sets = ", ".join(f"{k}=?" for k in upd)
                     conn.execute(f"UPDATE apps SET {sets} WHERE app_id=?",
-                                 (*fields.values(), app_id))
+                                 (*upd.values(), app_id))
             else:
                 cols = ["app_id", *fields.keys()]
                 conn.execute(
@@ -262,6 +314,26 @@ class Database:
             return conn.execute(
                 "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
+
+    def clear_jobs(self) -> int:
+        """Delete all finished jobs (done/failed/cancelled); keep running/queued.
+        Returns how many were removed."""
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM jobs WHERE state IN ('done','failed','cancelled')")
+            return cur.rowcount
+
+    def active_job(self, target: str, kinds: tuple[str, ...]):
+        """Most recent queued/running job for this target whose kind is in
+        `kinds` -- so a tab can re-attach to an in-progress job on reload."""
+        if not kinds:
+            return None
+        with self.connect() as conn:
+            ph = ",".join("?" * len(kinds))
+            return conn.execute(
+                f"SELECT * FROM jobs WHERE target=? AND kind IN ({ph}) "
+                f"AND state IN ('queued','running') ORDER BY id DESC LIMIT 1",
+                (target, *kinds)).fetchone()
 
     def set_job_state(self, job_id: int, state: str, error: str | None = None) -> None:
         with self.connect() as conn:
@@ -358,16 +430,111 @@ class Database:
 
     def add_dynamic_run(self, app_id: str, config: str, install_status: str,
                         crash_class: CrashClass, flows_captured: int,
-                        login_status: str, har_path: str = "", error: str = "") -> None:
+                        login_status: str, har_path: str = "", error: str = "",
+                        log: str = "") -> None:
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO dynamic_runs
                    (app_id, config, install_status, crash_class, flows_captured,
-                    login_status, har_path, error, run_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                    login_status, har_path, error, log, run_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (app_id, config, install_status, crash_class.value, flows_captured,
-                 login_status, har_path, error, _now()),
+                 login_status, har_path, error, log, _now()),
             )
+
+    # ---- IAP / subscription bypass probe -------------------------------
+
+    def save_iap_bypass(self, app_id: str, verdict: str, res: dict, n_iap_flows: int) -> None:
+        import json
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO iap_bypass
+                   (app_id, verdict, tamperable, fields, urls, method, analysis, error,
+                    n_iap_flows, probed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(app_id) DO UPDATE SET
+                     verdict=excluded.verdict, tamperable=excluded.tamperable,
+                     fields=excluded.fields, urls=excluded.urls, method=excluded.method,
+                     analysis=excluded.analysis, error=excluded.error,
+                     n_iap_flows=excluded.n_iap_flows, probed_at=excluded.probed_at""",
+                (app_id, verdict, int(bool(res.get("tamperable"))),
+                 json.dumps(res.get("fields") or []), json.dumps(res.get("urls") or []),
+                 res.get("method") or "", res.get("analysis") or "", res.get("error") or "",
+                 n_iap_flows, _now()),
+            )
+
+    def get_iap_bypass(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM iap_bypass WHERE app_id=?", (app_id,)).fetchone()
+
+    # ---- Data-storage inspection probe ---------------------------------
+
+    def save_storage_probe(self, app_id: str, verdict: str, note: str,
+                           findings: list, stores: dict) -> None:
+        import json
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO storage_probe (app_id, verdict, note, findings, stores, probed_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(app_id) DO UPDATE SET
+                     verdict=excluded.verdict, note=excluded.note,
+                     findings=excluded.findings, stores=excluded.stores,
+                     probed_at=excluded.probed_at""",
+                (app_id, verdict, note, json.dumps(findings), json.dumps(stores), _now()),
+            )
+
+    def get_storage_probe(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM storage_probe WHERE app_id=?", (app_id,)).fetchone()
+
+    # ---- Sideload / anti-resign probe ----------------------------------
+
+    def save_sideload_probe(self, app_id: str, verdict: str, note: str,
+                            control_alive: bool, fix_alive: bool,
+                            control_crashed: bool, fix_crashed: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO sideload_probe
+                   (app_id, verdict, note, control_alive, fix_alive,
+                    control_crashed, fix_crashed, probed_at)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(app_id) DO UPDATE SET
+                     verdict=excluded.verdict, note=excluded.note,
+                     control_alive=excluded.control_alive, fix_alive=excluded.fix_alive,
+                     control_crashed=excluded.control_crashed, fix_crashed=excluded.fix_crashed,
+                     probed_at=excluded.probed_at""",
+                (app_id, verdict, note, int(control_alive), int(fix_alive),
+                 int(control_crashed), int(fix_crashed), _now()),
+            )
+
+    def get_sideload_probe(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM sideload_probe WHERE app_id=?", (app_id,)).fetchone()
+
+    # ---- Pinning probe (differential SSL-pinning detection) ------------
+
+    def clear_pinning_probe(self, app_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM pinning_probe WHERE app_id=?", (app_id,))
+
+    def add_pinning_probe(self, app_id: str, host: str, verdict: str,
+                          seen_bypass: bool, seen_clean: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO pinning_probe
+                   (app_id, host, verdict, seen_bypass, seen_clean, probed_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (app_id, host, verdict, int(seen_bypass), int(seen_clean), _now()),
+            )
+
+    def get_pinning_probe(self, app_id: str):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM pinning_probe WHERE app_id=? "
+                "ORDER BY (verdict='pinned') DESC, host", (app_id,)).fetchall()
 
     # ---- Stage G: outcome ----------------------------------------------
 
@@ -429,6 +596,49 @@ class Database:
     def get_app(self, app_id: str):
         with self.connect() as conn:
             return conn.execute("SELECT * FROM apps WHERE app_id=?", (app_id,)).fetchone()
+
+    def set_bundle_id(self, app_id: str, bundle_id: str) -> None:
+        """Backfill a bundle id the crawl never captured (recovered from the IPA)."""
+        with self.connect() as conn:
+            conn.execute("UPDATE apps SET bundle_id=? WHERE app_id=?", (bundle_id, app_id))
+
+    def backfill_bundle_ids(self) -> tuple[int, int]:
+        """Populate missing bundle ids from the best available source: crawl
+        raw_json (bundleId), stored analysis Info.plist, or the decrypted IPA.
+        Returns (fixed, still_missing)."""
+        from pathlib import Path
+        from . import instrument
+        with self.connect() as conn:
+            ids = [r["app_id"] for r in conn.execute(
+                "SELECT app_id FROM apps WHERE bundle_id IS NULL OR bundle_id=''")]
+        fixed = 0
+        for aid in ids:
+            bid = None
+            r = self.get_app(aid)
+            if r and r["raw_json"]:
+                try:
+                    bid = json.loads(r["raw_json"]).get("bundleId")
+                except (ValueError, TypeError):
+                    bid = None
+            if not bid:
+                an = self.get_analysis(aid)
+                if an and an["info_plist"]:
+                    try:
+                        bid = (json.loads(an["info_plist"]).get("summary", {}) or {}).get("CFBundleIdentifier")
+                    except (ValueError, TypeError):
+                        bid = None
+            if not bid:
+                ac = self.get_acquisition(aid)
+                p = Path(ac["ipa_path"]) if ac and ac["ipa_path"] else None
+                if p and p.exists():
+                    bid = instrument.bundle_id_from_ipa(p)
+            if bid:
+                self.set_bundle_id(aid, bid)
+                fixed += 1
+        with self.connect() as conn:
+            missing = conn.execute(
+                "SELECT COUNT(*) FROM apps WHERE bundle_id IS NULL OR bundle_id=''").fetchone()[0]
+        return fixed, missing
 
     def _distinct(self, table: str, column: str, nonempty: bool = True) -> list[str]:
         with self.connect() as conn:
@@ -564,7 +774,8 @@ class Database:
     def save_analysis(self, app_id: str, data: dict) -> None:
         cols = ("info_plist", "entitlements", "ats", "frameworks", "sdks",
                 "secrets", "file_tree", "crypto_hints", "binary_protections",
-                "insecure_apis", "binary_type", "security_score", "trackers")
+                "insecure_apis", "binary_type", "security_score", "trackers",
+                "dependencies", "privacy_manifest", "bundled_certs", "app_extensions")
         vals = [json.dumps(data.get(c)) for c in cols]
         with self.connect() as conn:
             conn.execute(
@@ -578,6 +789,15 @@ class Database:
     def get_analysis(self, app_id: str):
         with self.connect() as conn:
             return conn.execute("SELECT * FROM analysis WHERE app_id=?", (app_id,)).fetchone()
+
+    def set_analysis_field(self, app_id: str, field: str, value: str) -> None:
+        """Update one JSON column on an existing analysis row (e.g. ats_gap set
+        after the deep analysis, since it needs a network/nscurl step)."""
+        allowed = {"ats_gap", "app_extensions", "dependencies", "privacy_manifest"}
+        if field not in allowed:
+            raise ValueError(f"field not allowed: {field}")
+        with self.connect() as conn:
+            conn.execute(f"UPDATE analysis SET {field}=? WHERE app_id=?", (value, app_id))
 
     def counts(self) -> dict[str, int]:
         with self.connect() as conn:

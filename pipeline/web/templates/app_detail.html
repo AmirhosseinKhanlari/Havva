@@ -6,10 +6,11 @@
 <div class="section">
   <div style="margin-bottom:16px"><a href="/corpus" class="pill small" style="text-decoration:none"><span style="font-size:15px;line-height:1">‹</span> Corpus</a></div>
   <div class="tabbar">
+    {% set tab_labels = {"iap": "In-App Purchase"} %}
     {% for t in tabs %}
     <button class="{% if t==tab %}on{% endif %}"
             hx-get="/app/{{ app_id }}/tab/{{ t }}" hx-target="#tab-content" hx-swap="innerHTML"
-            onclick="document.querySelectorAll('.tabbar button').forEach(e=>e.classList.remove('on'));this.classList.add('on')">{{ t }}</button>
+            onclick="document.querySelectorAll('.tabbar button').forEach(e=>e.classList.remove('on'));this.classList.add('on')">{{ tab_labels.get(t, t) }}</button>
     {% endfor %}
   </div>
   <div id="tab-content">

@@ -94,6 +94,157 @@ def cmd_dynamic(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_detect_pinning(args: argparse.Namespace) -> int:
+    from . import device, dynamic
+    db = Database(CONFIG.paths.db)
+    row = db.get_app(args.app)
+    if not row:
+        print(f"app not found: {args.app}")
+        return 1
+    driver = device.default_driver()
+    res = dynamic.detect_pinning(db, row, driver, aliased=not args.no_alias,
+                                 sign_env=args.sign_env, swap_certs=args.swap_certs)
+    tag = "" if res["reliable"] else "  (open/bypassable split UNRELIABLE: clean run did not launch)"
+    print(f"pinned, bypassable by SSL Kill Switch ({len(res['pinned'])}){tag}:")
+    for h in res["pinned"]:
+        print(f"  \N{LOCK} {h}")
+    print(f"pinned, NOT bypassable / hard-pinned ({len(res['hard_pinned'])}):")
+    for h in res["hard_pinned"]:
+        print(f"  \N{SHIELD} {h}")
+    if res["not_pinned"]:
+        print(f"open, no enforced pinning ({len(res['not_pinned'])}):")
+        for h in res["not_pinned"]:
+            print(f"  \N{OPEN LOCK} {h}")
+    if res["unresolved"]:
+        print(f"unresolved / dead endpoints ({len(res['unresolved'])}):")
+        for h in res["unresolved"]:
+            print(f"  \N{BALLOT X} {h}")
+    return 0
+
+
+def cmd_iap_bypass(args: argparse.Namespace) -> int:
+    from . import device, dynamic
+    db = Database(CONFIG.paths.db)
+    row = db.get_app(args.app)
+    if not row:
+        print(f"app not found: {args.app}")
+        return 1
+    driver = device.default_driver()
+    res = dynamic.detect_iap_bypass(db, row, driver, sign_env=args.sign_env,
+                                    swap_certs=args.swap_certs)
+    print(f"verdict: {res['verdict']} ({res.get('n_iap_flows', 0)} IAP flows)")
+    if res.get("method"):
+        print(f"  method: {res['method']}")
+    if res.get("fields"):
+        print(f"  fields: {', '.join(res['fields'])}")
+    if res.get("error"):
+        print(f"  error: {res['error']}")
+    return 0
+
+
+def cmd_detect_sideload(args: argparse.Namespace) -> int:
+    from . import dynamic
+    db = Database(CONFIG.paths.db)
+    row = db.get_app(args.app)
+    if not row:
+        print(f"app not found: {args.app}")
+        return 1
+    res = dynamic.detect_sideload(db, row, sign_env=args.sign_env,
+                                  monitor_seconds=args.secs)
+    print(f"verdict: {res['verdict']}")
+    print(f"  {res['note']}")
+    print(f"  plain re-sign survived: {res['control'].survived} | "
+          f"+SideloadFix survived: {res['fixed'].survived}")
+    return 0
+
+
+def cmd_inspect_storage(args: argparse.Namespace) -> int:
+    from . import dynamic
+    db = Database(CONFIG.paths.db)
+    row = db.get_app(args.app)
+    if not row:
+        print(f"app not found: {args.app}")
+        return 1
+    res = dynamic.inspect_storage(db, row, sign_env=args.sign_env, monitor_seconds=args.secs)
+    print(f"verdict: {res['verdict']} — {res['note']}")
+    print(f"stores: {res['stores']}")
+    for f in res["findings"]:
+        print(f"  [{f['severity']}] {f['store']} · {f['file']} · {f['type']}"
+              + (f" · {f['detail']}" if f.get('detail') else ""))
+    return 0
+
+
+def cmd_backfill_bundles(_args: argparse.Namespace) -> int:
+    db = Database(CONFIG.paths.db)
+    fixed, missing = db.backfill_bundle_ids()
+    print(f"backfilled {fixed} bundle id(s); {missing} still missing (no metadata / not acquired)")
+    return 0
+
+
+def cmd_sbom(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+    from . import cve
+    db = Database(CONFIG.paths.db)
+    an = db.get_analysis(args.app)
+    if not an:
+        print(f"app not analyzed: {args.app} (run deep analysis first)")
+        return 1
+    deps = json.loads(an["dependencies"]) if an["dependencies"] else []
+    row = db.get_app(args.app)
+    meta = {"app_id": args.app, "name": row["name"] if row else args.app,
+            "version": (row["current_version"] if row else "")}
+    sbom = cve.build_sbom(meta, deps)
+    out = args.out or f"sbom_{args.app}.json"
+    Path(out).write_text(json.dumps(sbom, indent=2))
+    print(f"wrote {out} ({len(sbom.get('components', []))} components, "
+          f"{len(sbom.get('vulnerabilities', []))} vulnerabilities)")
+    return 0
+
+
+def cmd_dep_stats(args: argparse.Namespace) -> int:
+    from . import cve
+    s = cve.prevalence(Database(CONFIG.paths.db))
+    print(f"apps analyzed: {s['apps_analyzed']} | with deps: {s['apps_with_deps']} | "
+          f"with vulnerable dep: {s['apps_with_vuln_dep']} ({s['pct_vulnerable']}%)")
+    print("top vulnerable libraries:")
+    for n, c in s["top_vulnerable_libs"]:
+        print(f"  {c:4d}  {n}")
+    print("top CVEs:")
+    for n, c in s["top_cves"]:
+        print(f"  {c:4d}  {n}")
+    return 0
+
+
+def _print_ats(app_id: str, res: dict) -> None:
+    if not res.get("checked"):
+        print(f"{app_id}: skipped ({res.get('reason')})")
+        return
+    print(f"{app_id}: {res['verdict']} | {res['n_pass_default']}/{res['n_tested']} pass default ATS | "
+          f"{res['n_unnecessary']} unnecessary weakening(s)")
+    for u in res.get("unnecessary_weakenings", []):
+        print(f"    {u['domain']}: {u['detail']}")
+
+
+def cmd_ats_gap(args: argparse.Namespace) -> int:
+    from . import ats_runtime
+    db = Database(CONFIG.paths.db)
+    if args.app:
+        _print_ats(args.app, ats_runtime.assess_and_store(db, args.app))
+        return 0
+    with db.connect() as c:
+        ids = [r["app_id"] for r in c.execute(
+            "SELECT app_id FROM analysis WHERE ats_gap IS NULL").fetchall()]
+    if args.limit:
+        ids = ids[:args.limit]
+    for aid in ids:
+        try:
+            _print_ats(aid, ats_runtime.assess_and_store(db, aid))
+        except Exception as e:  # noqa: BLE001
+            print(f"{aid}: error {e}")
+    return 0
+
+
 def cmd_attest(args: argparse.Namespace) -> int:
     from . import attestation
     db = Database(CONFIG.paths.db)
@@ -246,6 +397,58 @@ def main() -> int:
     p_dyn = sub.add_parser("dynamic", help="run the bypass ladder on pinned apps")
     p_dyn.add_argument("--limit", type=int, help="max apps this run")
     p_dyn.set_defaults(func=cmd_dynamic)
+
+    p_pin = sub.add_parser("detect-pinning",
+                           help="differential SSL-pinning probe (clean vs SSL Kill Switch) on one app")
+    p_pin.add_argument("--app", required=True, help="app_id to probe")
+    p_pin.add_argument("--no-alias", action="store_true",
+                       help="inject dylibs under their real names (no evasion rename)")
+    p_pin.add_argument("--sign-env", choices=["dev", "dist"], default="dev",
+                       help="signing environment: dev (devicectl launch) or dist (ad-hoc, DVT)")
+    p_pin.add_argument("--swap-certs", action="store_true",
+                       help="also overwrite bundled certificate files with the MITM CA (MASTG-TECH-0064)")
+    p_pin.set_defaults(func=cmd_detect_pinning)
+
+    p_iapb = sub.add_parser("iap-bypass",
+                            help="IAP/subscription bypass detection via Llama on captured traffic")
+    p_iapb.add_argument("--app", required=True, help="app_id to probe")
+    p_iapb.add_argument("--sign-env", choices=["dev", "dist"], default="dev")
+    p_iapb.add_argument("--swap-certs", action="store_true", help="also swap bundled certs")
+    p_iapb.set_defaults(func=cmd_iap_bypass)
+
+    p_sl = sub.add_parser("detect-sideload",
+                          help="sideload/anti-resign probe (plain re-sign vs SideloadFix) on one app")
+    p_sl.add_argument("--app", required=True, help="app_id to probe")
+    p_sl.add_argument("--sign-env", choices=["dev", "dist"], default="dev",
+                      help="signing environment: dev (devicectl launch) or dist (ad-hoc, DVT)")
+    p_sl.add_argument("--secs", type=int, default=5, help="seconds to wait per launch (default 5)")
+    p_sl.set_defaults(func=cmd_detect_sideload)
+
+    p_st = sub.add_parser("inspect-storage",
+                          help="dynamic insecure-data-storage scan (pull app container + scan) on one app")
+    p_st.add_argument("--app", required=True, help="app_id to probe")
+    p_st.add_argument("--sign-env", choices=["dev", "dist"], default="dev",
+                      help="signing env; dev gives full-container access (default dev)")
+    p_st.add_argument("--secs", type=int, default=6, help="seconds to exercise the app (default 6)")
+    p_st.set_defaults(func=cmd_inspect_storage)
+
+    sub.add_parser("backfill-bundles",
+                   help="populate missing app bundle ids from raw_json / analysis / IPA"
+                   ).set_defaults(func=cmd_backfill_bundles)
+
+    p_sbom = sub.add_parser("sbom", help="write a CycloneDX SBOM for one app (MASTG-TECH-0132)")
+    p_sbom.add_argument("--app", required=True, help="app_id")
+    p_sbom.add_argument("--out", help="output path (default sbom_<app>.json)")
+    p_sbom.set_defaults(func=cmd_sbom)
+
+    p_ds = sub.add_parser("dep-stats", help="corpus dependency-vulnerability prevalence")
+    p_ds.set_defaults(func=cmd_dep_stats)
+
+    p_ag = sub.add_parser("ats-gap",
+                          help="ATS declared-vs-needed gap via nscurl (MASTG-TECH-0149)")
+    p_ag.add_argument("--app", help="one app_id (omit to batch over analyzed apps)")
+    p_ag.add_argument("--limit", type=int, help="max apps in batch mode")
+    p_ag.set_defaults(func=cmd_ats_gap)
 
     p_att = sub.add_parser("attest", help="attestation-enforcement differential test")
     p_att.add_argument("--limit", type=int, help="max apps this run")

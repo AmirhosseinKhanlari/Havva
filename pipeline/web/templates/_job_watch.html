@@ -1,5 +1,7 @@
 <div id="jobwrap-{{ job['id'] }}">
   {% include "_job_status.html" %}
+  <button id="stop-{{ job['id'] }}" class="pill danger small" style="margin:6px 0"
+          hx-post="/jobs/{{ job['id'] }}/cancel" hx-swap="none">Stop</button>
   <div class="logbox" id="log-{{ job['id'] }}"></div>
   <script>(function(){
     var box = document.getElementById('log-{{ job['id'] }}');
@@ -24,7 +26,8 @@
     }
     var es = new EventSource('/jobs/{{ job['id'] }}/stream');
     es.onmessage = function(e){ add(e.data); };
-    es.addEventListener('done', function(){ box.classList.add('done'); es.close(); });
+    es.addEventListener('done', function(){ box.classList.add('done'); es.close();
+      var sb = document.getElementById('stop-{{ job['id'] }}'); if(sb) sb.remove(); });
     es.onerror = function(){ /* server closes on completion; ignore */ };
   })();</script>
 </div>

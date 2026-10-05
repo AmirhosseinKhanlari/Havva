@@ -1,0 +1,86 @@
+<div class="hlist">
+  {% if not acquired %}
+  {% include "_acquire_first.html" %}
+  {% else %}
+  <div class="glass sm" style="padding:16px 18px;border:1.5px solid var(--accent)">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:18px">💳</span>
+      <div style="flex:1">
+        <div style="font-size:15px;font-weight:800">Detect IAP / subscription bypass</div>
+        <div class="muted" style="font-size:11.5px">Launches the app with pinning bypassed, captures the decrypted purchase / subscription traffic, and asks the Llama model whether any field is client-tamperable (so a MITM could unlock premium). Ported from the subscription paper.</div>
+      </div>
+    </div>
+    <form hx-post="/app/{{ app_id }}/iap-bypass" hx-target="#iap-action" hx-swap="innerHTML"
+          hx-confirm="Launch the app on the XR, capture IAP traffic, and send it to the Llama API?" style="margin-top:14px">
+      <div style="margin-bottom:12px">
+        <div class="muted" style="font-size:11.5px;margin-bottom:6px">Signing environment</div>
+        <label style="display:inline-flex;align-items:center;gap:7px;margin-right:18px">
+          <input type="radio" name="sign_env" value="dev" checked style="width:15px;height:15px;accent-color:var(--accent)">
+          <span style="font-size:12.5px">Development <span class="muted">· devicectl launch</span></span>
+        </label>
+        <label style="display:inline-flex;align-items:center;gap:7px">
+          <input type="radio" name="sign_env" value="dist" style="width:15px;height:15px;accent-color:var(--accent)">
+          <span style="font-size:12.5px">Distribution <span class="muted">· ad-hoc, DVT tunnel</span></span>
+        </label>
+      </div>
+      <div style="margin-bottom:12px">
+        <div class="muted" style="font-size:11.5px;margin-bottom:6px">Capture window</div>
+        <label style="display:inline-flex;align-items:center;gap:8px">
+          <input type="number" name="monitor_seconds" value="{{ monitor_default }}" min="3" max="300" step="1"
+                 style="width:74px;padding:7px 10px;font-size:13px;border-radius:9px;border:1px solid var(--field-brd);background:var(--field);color:inherit">
+          <span class="muted" style="font-size:12px">seconds to drive the app and capture traffic</span>
+        </label>
+      </div>
+      <label style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
+        <input type="checkbox" name="swap_certs" style="width:16px;height:16px;accent-color:var(--accent)">
+        <span style="font-size:12.5px">Also swap bundled certificates with the MITM CA (for cert-pinned apps)</span>
+      </label>
+      <button class="pill primary">▶ Detect IAP bypass</button>
+    </form>
+  </div>
+
+  {% if iap %}
+  {% set v = iap['verdict'] %}
+  {% set IB = {
+    'bypassable':     ['🔓','Subscription bypassable','The Llama model found a client-tamperable field: a MITM could flip it to unlock premium. The app trusts a client-visible value instead of verifying server-side.','var(--bad)','rgba(255,69,58,.14)'],
+    'not_bypassable': ['✅','No client-tamperable fields','IAP traffic was captured but no field was judged tamperable. Likely verified server-side.','var(--ok)','rgba(48,209,150,.14)'],
+    'inconclusive':   ['❓','Inconclusive','No IAP traffic captured, or the model could not decide. Drive the purchase flow and re-run.','var(--ink2)','var(--field)'],
+  } %}
+  {% set c = IB.get(v, ['•', v|replace('_',' ')|title, iap['method'] or '', 'var(--ink)', 'var(--field)']) %}
+  <div class="glass sm" style="overflow:hidden">
+    <div style="display:flex;gap:14px;align-items:flex-start;padding:16px 18px">
+      <div style="width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:23px;background:{{ c[4] }};flex:none">{{ c[0] }}</div>
+      <div style="flex:1;min-width:0">
+        <div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px">IAP bypass</div>
+        <div style="font-size:17px;font-weight:800;color:{{ c[3] }};margin-top:1px">{{ c[1] }}</div>
+        <div class="muted" style="font-size:12.5px;line-height:1.55;margin-top:4px">{{ iap['method'] or c[2] }}</div>
+        {% if iap['error'] %}<div style="font-size:11.5px;color:var(--warn);margin-top:6px">{{ iap['error'] }}{% if iap['error']=='LLAMA_API_KEY not set' %} — set LLAMA_API_KEY in .env{% endif %}</div>{% endif %}
+        <div class="muted" style="font-size:11px;margin-top:8px">{{ iap['n_iap_flows'] }} IAP-related flow(s) analyzed</div>
+      </div>
+    </div>
+    {% if iap['fields'] %}
+    <div style="padding:10px 18px;border-top:1px solid var(--hair)">
+      <div class="muted" style="font-size:11px;margin-bottom:5px">Tamperable fields</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">{% for f in iap['fields'] %}<span class="badge mono" style="background:rgba(255,69,58,.14);color:var(--bad)">{{ f }}</span>{% endfor %}</div>
+    </div>
+    {% endif %}
+    {% if iap['urls'] %}
+    <div style="padding:10px 18px;border-top:1px solid var(--hair)">
+      <div class="muted" style="font-size:11px;margin-bottom:5px">Endpoints</div>
+      {% for u in iap['urls'] %}<div class="mono ink2" style="font-size:11.5px;word-break:break-all">{{ u }}</div>{% endfor %}
+    </div>
+    {% endif %}
+    {% if iap['analysis'] %}
+    <details class="pin-details">
+      <summary style="padding:10px 18px;border-top:1px solid var(--hair);cursor:pointer;display:flex;align-items:center;gap:9px">
+        <span class="cchev">›</span><span class="muted" style="font-size:11.5px">Raw model verdict</span>
+      </summary>
+      <pre class="logbox done" style="margin:0 18px 14px;white-space:pre-wrap;word-break:break-word;color:var(--ink2)">{{ iap['analysis'] }}</pre>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div id="iap-action">{% if active_job %}{% with job=active_job, phase=active_phase, reload=active_reload %}{% include "_job_watch.html" %}{% endwith %}{% endif %}</div>
+  {% endif %}
+</div>

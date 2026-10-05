@@ -72,6 +72,22 @@ def config_specs(config: str) -> list[DylibSpec]:
     raise ValueError(f"unknown config: {config}")
 
 
+def bundle_id_from_ipa(ipa_path: str | Path) -> str:
+    """Read CFBundleIdentifier from an IPA's Payload/<App>.app/Info.plist.
+    Used to recover a bundle id the corpus DB never captured (else we would
+    try to launch a null bundle id and fail on both signing paths)."""
+    try:
+        with zipfile.ZipFile(ipa_path) as z:
+            infos = [n for n in z.namelist()
+                     if n.startswith("Payload/") and n.endswith(".app/Info.plist")]
+            if not infos:
+                return ""
+            info = plistlib.loads(z.read(sorted(infos, key=len)[0]))
+            return info.get("CFBundleIdentifier", "") or ""
+    except (zipfile.BadZipFile, OSError, plistlib.InvalidFileException, KeyError):
+        return ""
+
+
 def dylib_catalog() -> list[dict]:
     """User-selectable dylibs for the dynamic stage, with on-disk availability."""
     d = CONFIG.dylibs
@@ -108,18 +124,19 @@ def custom_specs(selected_ids: list[str], aliased: bool = True) -> list[DylibSpe
     return specs
 
 
-def ensure_pem() -> bool:
-    """Make sure a signing PEM exists; export it from the .p12 if needed."""
-    s = CONFIG.signing
-    if s.pem.exists():
+def ensure_pem(rs=None) -> bool:
+    """Make sure the signing PEM for `rs` (a ResolvedSigning) exists; export it
+    from the .p12 if needed. Defaults to the configured environment."""
+    rs = rs or CONFIG.signing.resolve()
+    if rs.pem.exists():
         return True
-    if not s.p12.exists():
-        log.error("no signing cert: %s missing", s.p12)
+    if not rs.p12.exists():
+        log.error("no signing cert: %s missing", rs.p12)
         return False
     for extra in (["-legacy"], []):
-        p = run_cmd(["openssl", "pkcs12", *extra, "-in", str(s.p12), "-out", str(s.pem),
-                     "-nodes", "-passin", f"pass:{s.p12_password}"], timeout=60)
-        if s.pem.exists():
+        run_cmd(["openssl", "pkcs12", *extra, "-in", str(rs.p12), "-out", str(rs.pem),
+                 "-nodes", "-passin", f"pass:{rs.p12_password}"], timeout=60)
+        if rs.pem.exists():
             return True
     log.error("failed to export PEM from p12")
     return False
@@ -167,12 +184,53 @@ def _write_gadget_config(dest: Path) -> None:
     dest.write_text(json.dumps(cfg))
 
 
+def _swap_bundled_certs(app_dir: Path, ca_pem: "str | Path") -> int:
+    """Overwrite certificate files inside the app bundle with the MITM CA
+    (MASTG-TECH-0064). Defeats pinning that compares the server cert against a
+    cert shipped in the bundle. .cer/.der get DER, .pem/.crt/.cert get PEM.
+    .p12/.pfx/.pub/.key are left alone (can't forge without the private key)."""
+    ca_pem = Path(ca_pem)
+    if not ca_pem.exists():
+        log.warning("cert swap: MITM CA not found at %s; skipping", ca_pem)
+        return 0
+    pem_bytes = ca_pem.read_bytes()
+    der_bytes = b""
+    tmp_der = app_dir.parent / "_mitm_ca.der"
+    run_cmd(["openssl", "x509", "-in", str(ca_pem), "-outform", "DER",
+             "-out", str(tmp_der)], timeout=30)
+    if tmp_der.exists():
+        der_bytes = tmp_der.read_bytes()
+        tmp_der.unlink(missing_ok=True)
+    swapped = 0
+    for f in app_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        ext = f.suffix.lower()
+        if ext in (".cer", ".der"):
+            data = der_bytes or pem_bytes
+        elif ext in (".pem", ".crt", ".cert"):
+            data = pem_bytes
+        else:
+            continue
+        try:
+            f.write_bytes(data)
+            swapped += 1
+            log.info("  swapped bundled cert: %s", f.relative_to(app_dir))
+        except OSError:
+            pass
+    return swapped
+
+
 def build(app_id: str, decrypted_ipa: str | Path, config: str,
-          specs: "list[DylibSpec] | None" = None) -> tuple[bool, str, str]:
+          specs: "list[DylibSpec] | None" = None,
+          sign_env: str | None = None, swap_certs: bool = False) -> tuple[bool, str, str]:
     """Build a signed IPA for `config`. If `specs` is given, inject exactly those
     dylibs (a custom selection) instead of the named config's fixed set.
+    `sign_env` ("dev"/"dist") picks the cert+profile; defaults to configured.
+    `swap_certs` overwrites bundled certificate files with the MITM CA.
     Returns (ok, signed_ipa_path, error)."""
-    if not ensure_pem():
+    rs = CONFIG.signing.resolve(sign_env)
+    if not ensure_pem(rs):
         return False, "", "no signing PEM"
     decrypted_ipa = Path(decrypted_ipa)
     if not decrypted_ipa.exists():
@@ -198,6 +256,10 @@ def build(app_id: str, decrypted_ipa: str | Path, config: str,
 
     fw = app_dir / "Frameworks"
     fw.mkdir(exist_ok=True)
+
+    if swap_certs:
+        n = _swap_bundled_certs(app_dir, CONFIG.proxyman.ca_cert)
+        log.info("cert swap: replaced %d bundled cert file(s) with the MITM CA", n)
 
     if specs is None:
         try:
@@ -241,8 +303,8 @@ def build(app_id: str, decrypted_ipa: str | Path, config: str,
     if out.exists():
         out.unlink()
     s = CONFIG.signing
-    log.info("re-signing with zsign ...")
-    p = run_cmd([str(s.zsign), "-k", str(s.pem), "-m", str(s.mobileprovision),
+    log.info("re-signing with zsign (%s cert) ...", rs.env)
+    p = run_cmd([str(s.zsign), "-k", str(rs.pem), "-m", str(rs.mobileprovision),
                  "-o", str(out), str(staged_ipa)], timeout=300)
     staged_ipa.unlink(missing_ok=True)
     if out.exists() and out.stat().st_size > 0:

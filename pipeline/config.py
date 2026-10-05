@@ -98,6 +98,18 @@ class DecryptDevice:
     # Path to the ipadecrypt helper/CLI as invoked from the Mac host.
     ipadecrypt_cmd: str = field(default_factory=lambda: _env("IPADECRYPT_CMD", "ipadecrypt"))
 
+    def online(self, timeout: float = 2.5) -> bool:
+        """True if the jailbroken iPhone 8 answers on its SSH port. Acquire needs
+        it for FairPlay decryption, so this gates the acquire process."""
+        if not self.ssh_host:
+            return False
+        import socket
+        try:
+            with socket.create_connection((self.ssh_host, self.ssh_port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
     @property
     def bootstrap_config(self) -> Path:
         """ipadecrypt stores device/App-Store setup here after `bootstrap`."""
@@ -132,6 +144,11 @@ class TestDevice:
     """Non-jailbroken iPhone XR used for all bypass testing."""
     udid: str = field(default_factory=lambda: _env("TEST_DEVICE_UDID", ""))
     client_ip: str = field(default_factory=lambda: _env("TEST_DEVICE_IP", ""))
+    # pymobiledevice3 launches ad-hoc apps like Instruments (DVT process-control),
+    # which -- unlike devicectl's debug launch -- does not require a Development
+    # (get-task-allow) signature. Its native tunnel needs no root on macOS.
+    pmd3_bin: str = field(default_factory=lambda: _env(
+        "PMD3_BIN", os.path.expanduser("~/.venvs/pmd3/bin/pymobiledevice3")))
 
 
 @dataclass(frozen=True)
@@ -145,6 +162,9 @@ class Appium:
     xcode_org_id: str = field(default_factory=lambda: _env("APPIUM_TEAM_ID", ""))       # e.g. 8CG9QYMSR5
     xcode_signing_id: str = field(default_factory=lambda: _env("APPIUM_SIGNING_ID", "Apple Development"))
     wda_bundle_id: str = field(default_factory=lambda: _env("APPIUM_WDA_BUNDLE", ""))   # e.g. com.you.WebDriverAgentRunner
+    # Off by default: use plain cold-launch (launch/wait/uninstall). Set
+    # APPIUM_ENABLED=1 to opt back into UI-driven runs once WDA is set up.
+    enabled: bool = field(default_factory=lambda: _env("APPIUM_ENABLED", "").lower() in ("1", "true", "yes"))
 
     @property
     def configured(self) -> bool:
@@ -152,22 +172,75 @@ class Appium:
 
 
 @dataclass(frozen=True)
+class Llama:
+    """LLM used to judge whether captured IAP/subscription traffic is
+    client-tamperable (bypassable). Two providers:
+      llama_api : Meta's hosted Llama API (needs a key with model access).
+      ollama    : local Ollama (no key; run `ollama serve` + pull a model)."""
+    provider: str = field(default_factory=lambda: _env("LLAMA_PROVIDER", "llama_api").lower())
+    api_url: str = field(default_factory=lambda: _env(
+        "LLAMA_API_URL", "https://api.llama.com/v1/chat/completions"))
+    api_key: str = field(default_factory=lambda: _env("LLAMA_API_KEY", ""))
+    model: str = field(default_factory=lambda: _env(
+        "LLAMA_MODEL", "Llama-4-Maverick-17B-128E-Instruct-FP8"))
+    ollama_url: str = field(default_factory=lambda: _env("OLLAMA_URL", "http://localhost:11434"))
+    ollama_model: str = field(default_factory=lambda: _env("OLLAMA_MODEL", "llama3.1"))
+
+
+@dataclass(frozen=True)
 class Proxyman:
     cli: str = field(default_factory=lambda: _env(
         "PROXYMAN_CLI", "/Applications/Proxyman.app/Contents/MacOS/proxyman-cli"))
     port: int = field(default_factory=lambda: int(_env("PROXYMAN_PORT", "9090")))
+    # MITM CA cert (PEM), used by the optional "swap bundled certificates" bypass
+    # (MASTG-TECH-0064) to overwrite certs pinned inside an app bundle.
+    ca_cert: Path = field(default_factory=lambda: _env_path(
+        "PROXY_CA_CERT", Path(os.path.expanduser(
+            "~/Library/Application Support/com.proxyman.NSProxy/app-data/proxyman-ca.pem"))))
+
+
+@dataclass(frozen=True)
+class ResolvedSigning:
+    """A concrete (cert, profile) set for one signing environment."""
+    env: str                 # "dev" | "dist"
+    p12: Path
+    pem: Path
+    mobileprovision: Path
+    p12_password: str
+    get_task_allow: bool     # dev profiles allow devicectl's debug launch
 
 
 @dataclass(frozen=True)
 class Signing:
-    """Re-signing assets. zsign wants a PEM + mobileprovision; if only a .p12 is
-    present, instrument.py exports the PEM from it using the password below."""
+    """Re-signing assets for two environments. zsign wants a PEM + profile.
+
+      dist : ad-hoc Distribution cert (get-task-allow=false). Launch via
+             pymobiledevice3 DVT (devicectl's debug launch is denied).
+      dev  : Apple Development cert (get-task-allow=true). Launch via devicectl.
+
+    Pick the default with SIGN_ENV=dev|dist; a run can override per call."""
     zsign: Path = field(default_factory=lambda: _env_path("ZSIGN", PROJECT_ROOT.parent / "zsign"))
+    # Distribution / ad-hoc (default).
     p12: Path = field(default_factory=lambda: _env_path("SIGN_P12", PROJECT_ROOT.parent / "Certs" / "Certificates.p12"))
     pem: Path = field(default_factory=lambda: _env_path("SIGN_PEM", PROJECT_ROOT.parent / "Certs" / "dis.pem"))
     mobileprovision: Path = field(default_factory=lambda: _env_path(
         "SIGN_PROFILE", PROJECT_ROOT.parent / "Certs" / "amir.mobileprovision"))
     p12_password: str = field(default_factory=lambda: _env("SIGN_P12_PASSWORD", ""))
+    # Development (get-task-allow=true).
+    dev_p12: Path = field(default_factory=lambda: _env_path("SIGN_DEV_P12", PROJECT_ROOT.parent / "Certs" / "Development" / "Certificates.p12"))
+    dev_pem: Path = field(default_factory=lambda: _env_path("SIGN_DEV_PEM", PROJECT_ROOT.parent / "Certs" / "Development" / "dev.pem"))
+    dev_mobileprovision: Path = field(default_factory=lambda: _env_path(
+        "SIGN_DEV_PROFILE", PROJECT_ROOT.parent / "Certs" / "Development" / "Dev.mobileprovision"))
+    dev_p12_password: str = field(default_factory=lambda: _env("SIGN_DEV_P12_PASSWORD", ""))
+    default_env: str = field(default_factory=lambda: _env("SIGN_ENV", "dist").lower())
+
+    def resolve(self, env: str | None = None) -> ResolvedSigning:
+        env = (env or self.default_env or "dist").lower()
+        if env in ("dev", "development"):
+            return ResolvedSigning("dev", self.dev_p12, self.dev_pem,
+                                   self.dev_mobileprovision, self.dev_p12_password, True)
+        return ResolvedSigning("dist", self.p12, self.pem,
+                               self.mobileprovision, self.p12_password, False)
 
 
 @dataclass(frozen=True)
@@ -207,6 +280,7 @@ class Config:
     appium: Appium = field(default_factory=Appium)
     proxyman: Proxyman = field(default_factory=Proxyman)
     signing: Signing = field(default_factory=Signing)
+    llama: Llama = field(default_factory=Llama)
     dylibs: Dylibs = field(default_factory=Dylibs)
     runtime: Runtime = field(default_factory=Runtime)
     acquire_mode: str = ACQUIRE_MODE

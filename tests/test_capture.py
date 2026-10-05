@@ -67,3 +67,55 @@ def test_gzip_base64_body_decode():
 def test_empty_har():
     assert har_to_flows({}, "1.2.3.4") == []
     assert app_hosts([]) == set()
+
+
+# ---- Native session trace classification (pinning detection) ----------------
+
+from pipeline.capture import _classify_trace, session_host_outcomes  # noqa: E402
+
+
+def _trace(host, kinds, details=None):
+    details = details or {}
+    events = [{"kind": k, "detail": details.get(k, "")} for k in kinds]
+    return {"resolvedHost": host, "events": events}
+
+
+def test_classify_decrypted():
+    t = _trace("api.x.com", ["resolved", "connected", "tlsMessage", "tlsComplete", "closed"])
+    assert _classify_trace(t) == ("api.x.com", "decrypted")
+
+
+def test_classify_pinned_when_tls_aborts_before_complete():
+    # Connected, TLS started against our cert, then torn down -> pinning.
+    t = _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "error", "closed"])
+    assert _classify_trace(t) == ("api.bank.com", "pinned")
+
+
+def test_classify_unresolved_is_not_pinned():
+    t = _trace("dead.example", ["error"],
+               details={"error": "Could not resolve host: dead.example"})
+    assert _classify_trace(t) == ("dead.example", "unresolved")
+
+
+def test_classify_tunneled_excluded_host_is_unknown_not_pinned():
+    # Apple host we chose NOT to intercept: connects, no cert presented
+    # (no tlsMessage), no error -> unknown, must never be called pinned.
+    t = _trace("gsp.apple.com", ["resolved", "connected", "closed"])
+    assert _classify_trace(t) == ("gsp.apple.com", "unknown")
+
+
+def test_session_host_outcomes_prefers_decrypted_and_drops_excluded(tmp_path):
+    import json
+    import zipfile
+    traces = [
+        _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "error"]),   # pinned
+        _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "tlsComplete"]),  # decrypted -> wins
+        _trace("cdn.x.io", ["resolved", "connected", "tlsMessage", "error"]),        # pinned
+        _trace("gsp.apple.com", ["resolved", "connected", "tlsMessage", "error"]),   # excluded -> dropped
+    ]
+    p = tmp_path / "s.proxymansession"
+    with zipfile.ZipFile(p, "w") as z:
+        for i, t in enumerate(traces):
+            z.writestr(f"ConnectionTraces/trace_{i}", json.dumps(t))
+    out = session_host_outcomes(p, excluded=["apple.com"])
+    assert out == {"api.bank.com": "decrypted", "cdn.x.io": "pinned"}

@@ -105,6 +105,10 @@ def test_acquire_action_keys_by_corpus_app_id(monkeypatch):
         return WorkState.POSITIVE, "ipas/555.decrypted.ipa", ""
 
     monkeypatch.setattr(acq, "acquire_one", fake_acquire_one)
+    # The acquire route gates on the decrypt device being online; this test isn't
+    # about connectivity, so pretend the iPhone 8 is reachable.
+    from pipeline.config import CONFIG
+    monkeypatch.setattr(type(CONFIG.decrypt_device), "online", lambda self, timeout=2.5: True)
     r = c.post("/app/555/acquire", data={"version": ""})
     assert r.status_code == 200
     end = time.time() + 5

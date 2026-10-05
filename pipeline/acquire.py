@@ -23,6 +23,36 @@ from .util import get_logger, run_cmd, run_cmd_streamed
 
 log = get_logger("acquire", CONFIG.paths.log_dir)
 
+
+def sync_ipadecrypt_host() -> None:
+    """ipadecrypt keeps its own ~/.ipadecrypt/config.json (device.host/port/user),
+    which it uses for the SSH decrypt. Keep it in sync with DECRYPT_SSH_HOST so the
+    .env / web settings are the single source of truth for the iPhone 8 IP."""
+    import json
+    dd = CONFIG.decrypt_device
+    if not dd.ssh_host:
+        return
+    cfg = dd.bootstrap_config
+    try:
+        data = json.loads(cfg.read_text())
+    except (OSError, ValueError):
+        return
+    dev = data.get("device")
+    if not isinstance(dev, dict):
+        return
+    changed = False
+    for key, val in (("host", dd.ssh_host), ("port", dd.ssh_port), ("user", dd.ssh_user)):
+        if val and dev.get(key) != val:
+            dev[key] = val
+            changed = True
+    if changed:
+        try:
+            cfg.write_text(json.dumps(data, indent=1))
+            log.info("synced ipadecrypt device -> %s@%s:%s", dev.get("user"),
+                     dev.get("host"), dev.get("port"))
+        except OSError as e:
+            log.warning("could not sync ipadecrypt config: %s", e)
+
 # Substrings in ipadecrypt output that mean the app is permanently unavailable.
 _PERMANENT = ("not found", "no such app", "404", "not available",
               "does not exist", "unavailable in")
@@ -160,7 +190,8 @@ def download_with_ipatool(app_id: str, row, purchase: bool = False,
 
 
 def download_with_appstore(app_id: str, row, country: str = "us",
-                           app_ver_id: str | None = None) -> tuple[bool, str, str]:
+                           app_ver_id: str | None = None,
+                           progress_cb=None) -> tuple[bool, str, str]:
     """Download the still-encrypted IPA via the Windows iTunes server (MZStore
     protocol). Auth material comes from real iTunes, so it is not throttled like
     ipatool. Returns (ok, path, error). Stages the file as {app_id}.enc.ipa so
@@ -193,7 +224,7 @@ def download_with_appstore(app_id: str, row, country: str = "us",
     work.mkdir(parents=True, exist_ok=True)
     ok, path, err = appstore_dl.download_encrypted(
         str(store_id), str(work), CONFIG.appstore.itunes_server, country.upper(),
-        app_ver_id=verid)
+        app_ver_id=verid, progress_cb=progress_cb)
     if not ok:
         return False, "", err or "appstore download failed"
 
@@ -208,7 +239,7 @@ def download_with_appstore(app_id: str, row, country: str = "us",
 
 def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = False,
                 auth_code: str = "", timeout: int = 900,
-                app_ver_id: str | None = None) -> tuple[WorkState, str, str]:
+                app_ver_id: str | None = None, progress_cb=None) -> tuple[WorkState, str, str]:
     """Acquire + decrypt one app. Returns (work_state, ipa_path, error).
 
     Two modes (config.acquire_mode):
@@ -220,6 +251,7 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
                   app_ver_id to fetch an OLDER build), then ipadecrypt decrypts.
     """
     CONFIG.paths.ipa_dir.mkdir(parents=True, exist_ok=True)
+    sync_ipadecrypt_host()   # keep ipadecrypt's host in sync with DECRYPT_SSH_HOST
     # Decrypted outputs are marked ".decrypted.ipa" so they're never confused
     # with encrypted App Store IPAs. A specific older version gets its verId in
     # the name so it never collides with the current build.
@@ -233,7 +265,8 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
     if CONFIG.acquire_mode in ("ipatool", "appstore"):
         if CONFIG.acquire_mode == "appstore":
             ok, enc_path, err = download_with_appstore(app_id, row, country=country,
-                                                       app_ver_id=app_ver_id)
+                                                       app_ver_id=app_ver_id,
+                                                       progress_cb=progress_cb)
         else:
             ok, enc_path, err = download_with_ipatool(app_id, row, purchase=purchase, auth_code=auth_code)
         if not ok:
@@ -252,6 +285,8 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
         if from_appstore:
             cmd.append("--from-appstore")
 
+    if progress_cb:
+        progress_cb(0)   # download done; decrypt has no % -> indeterminate bar
     log.info("  decrypting on device (ipadecrypt) ...")
     # Stream ipadecrypt's live output so its progress is visible.
     proc = run_cmd_streamed(cmd, timeout=timeout)
@@ -283,7 +318,8 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
 
 def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None = None,
                 country: str = "us", from_appstore: bool = False, purchase: bool = False,
-                auth_code: str = "", app_ver_id: str | None = None) -> tuple[WorkState, str, str]:
+                auth_code: str = "", app_ver_id: str | None = None,
+                progress_cb=None) -> tuple[WorkState, str, str]:
     """Download + install + decrypt ONE specific app by bundle id and/or numeric
     App Store id. At least one identifier is required. Returns
     (work_state, ipa_path, error) and records it in the DB like the corpus path.
@@ -294,6 +330,11 @@ def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None =
         return WorkState.DONE_NEGATIVE, "", "need a bundle id or app id"
     if not CONFIG.decrypt_device.is_bootstrapped:
         return WorkState.UNTESTED, "", "ipadecrypt not bootstrapped"
+    if not CONFIG.decrypt_device.online():
+        dd = CONFIG.decrypt_device
+        where = f"{dd.ssh_host}:{dd.ssh_port}" if dd.ssh_host else "(DECRYPT_SSH_HOST not set)"
+        log.error("decrypt device (iPhone 8) offline at %s; not acquiring", where)
+        return WorkState.UNTESTED, "", f"decrypt device (iPhone 8) offline at {where}"
     if CONFIG.acquire_mode == "ipatool" and not _ipatool_login():
         return WorkState.UNTESTED, "", "ipatool not authenticated"
     if app_ver_id and CONFIG.acquire_mode != "appstore":
@@ -305,8 +346,14 @@ def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None =
              " [purchase]" if purchase else "",
              f" [version {app_ver_id}]" if app_ver_id else "")
     state, path, err = decrypt_one(key, row, from_appstore, purchase=purchase,
-                                   auth_code=auth_code, app_ver_id=app_ver_id)
-    db.upsert_app(key, country, bundle_id=bundle_id)
+                                   auth_code=auth_code, app_ver_id=app_ver_id,
+                                   progress_cb=progress_cb)
+    # Recover the real bundle id from the decrypted IPA (the crawl often has none).
+    resolved_bid = bundle_id
+    if state == WorkState.POSITIVE and path:
+        from . import instrument
+        resolved_bid = bundle_id or instrument.bundle_id_from_ipa(path)
+    db.upsert_app(key, country, bundle_id=resolved_bid)
     db.save_acquisition(key, state, ipa_path=path, error=err)
     if state == WorkState.POSITIVE:
         db.set_stage(key, Stage.ACQUIRED)

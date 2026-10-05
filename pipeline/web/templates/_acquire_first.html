@@ -1,0 +1,12 @@
+<div class="glass sm" style="padding:26px 22px;text-align:center">
+  <div style="width:52px;height:52px;border-radius:15px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:26px;background:var(--field)">📥</div>
+  <div style="font-size:16px;font-weight:800">No acquired build yet</div>
+  <div class="muted" style="font-size:12.5px;line-height:1.55;margin:6px auto 16px;max-width:380px">
+    This app has no decrypted IPA on disk, so {{ 'static analysis' if tab == 'static' else 'dynamic testing' }} can't run.
+    Acquire (download + decrypt) a build first.
+  </div>
+  <button class="pill primary" hx-get="/app/{{ app_id }}/tab/acquire" hx-target="#tab-content" hx-swap="innerHTML"
+          onclick="document.querySelectorAll('.tabbar button').forEach(function(e){e.classList.toggle('on', e.textContent.trim()==='acquire');})">
+    Go to Acquire
+  </button>
+</div>

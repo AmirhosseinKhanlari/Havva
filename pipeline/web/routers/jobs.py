@@ -79,3 +79,11 @@ def jobs_watch(job_id: int, request: Request, reload: str = "",
 def jobs_cancel(job_id: int, request: Request, _: None = Depends(require_auth)):
     get_jobs_manager().cancel(job_id)
     return templates.TemplateResponse(request, "_job_row.html", {"request": request, "jobs": get_db().list_jobs()})
+
+
+@router.post("/jobs/clear")
+def jobs_clear(request: Request, _: None = Depends(require_auth)):
+    """Remove all finished jobs (done/failed/cancelled); running/queued stay."""
+    get_db().clear_jobs()
+    return templates.TemplateResponse(request, "_job_row.html",
+                                      {"request": request, "jobs": get_db().list_jobs()})

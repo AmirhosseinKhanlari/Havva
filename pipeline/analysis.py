@@ -127,6 +127,24 @@ _API_RULES = [
     ("NSLog logging", "info", [b"_NSLog"]),
     ("ptrace anti-debug (non-public API)", "medium", [b"_ptrace"]),
     ("UIWebView (deprecated/insecure)", "medium", [b"UIWebView"]),
+    # ---- Insecure local data storage (Trelis iOS static guide / MobSF) ----
+    # These stores are unencrypted by default; flag so sensitive data landing
+    # there can be reviewed. Locations: Library/Preferences/*.plist (NSUserDefaults),
+    # app-container *.sqlite / Cache.db, Realm files, pasteboard, Cookies/.
+    ("NSUserDefaults (unencrypted storage)", "info",
+     [b"NSUserDefaults", b"standardUserDefaults"]),
+    ("Local SQLite / Core Data (unencrypted DB)", "info",
+     [b"sqlite3_open", b"sqlite3_exec", b"sqlite3_prepare", b"NSSQLiteStoreType",
+      b"NSPersistentStoreCoordinator", b"NSManagedObjectContext"]),
+    ("Realm database (verify encryptionKey)", "info", [b"RLMRealm", b"RealmSwift"]),
+    ("Weak Keychain accessibility (kSecAttrAccessibleAlways)", "medium",
+     [b"kSecAttrAccessibleAlways"]),
+    ("Pasteboard use (system-wide data leakage)", "info",
+     [b"generalPasteboard", b"UIPasteboard"]),
+    ("Cookie storage (may persist session/sensitive data)", "info",
+     [b"NSHTTPCookieStorage"]),
+    ("Keyboard cache (disable for sensitive fields)", "info",
+     [b"autocorrectionType", b"UITextAutocorrectionType"]),
 ]
 
 _EMAIL_RE = re.compile(rb"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -200,7 +218,9 @@ def info_plist(zf: zipfile.ZipFile, app_dir: str) -> dict:
     keys = ("CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion",
             "CFBundleName", "CFBundleDisplayName", "MinimumOSVersion",
             "CFBundleExecutable", "UIBackgroundModes", "CFBundleURLTypes",
-            "LSApplicationQueriesSchemes")
+            "LSApplicationQueriesSchemes", "UIFileSharingEnabled",
+            "LSSupportsOpeningDocumentsInPlace", "WKAppBoundDomains",
+            "CFBundleDocumentTypes")
     summary = {k: pl.get(k) for k in keys if k in pl}
     perms = {k: v for k, v in pl.items() if k.endswith("UsageDescription")}
     return {"summary": summary, "permissions": perms, "raw_keys": sorted(pl.keys())}
@@ -214,12 +234,29 @@ def ats(zf: zipfile.ZipFile, app_dir: str) -> dict:
     a = pl.get("NSAppTransportSecurity")
     if not isinstance(a, dict):
         return {"present": False}
+    # Granular per-domain exceptions (MASTG-TEST-0342): min TLS, insecure HTTP,
+    # forward secrecy, cert transparency, subdomains.
+    exc = a.get("NSExceptionDomains") or {}
+    details = []
+    for domain, cfg in exc.items():
+        if not isinstance(cfg, dict):
+            continue
+        details.append({
+            "domain": domain,
+            "insecure_http": bool(cfg.get("NSExceptionAllowsInsecureHTTPLoads", False)),
+            "min_tls": cfg.get("NSExceptionMinimumTLSVersion", "TLSv1.2"),
+            "forward_secrecy": bool(cfg.get("NSExceptionRequiresForwardSecrecy", True)),
+            "includes_subdomains": bool(cfg.get("NSIncludesSubdomains", False)),
+            "requires_ct": bool(cfg.get("NSRequiresCertificateTransparency", False)),
+        })
     return {
         "present": True,
         "allows_arbitrary_loads": bool(a.get("NSAllowsArbitraryLoads", False)),
         "allows_arbitrary_loads_media": bool(a.get("NSAllowsArbitraryLoadsForMedia", False)),
         "allows_arbitrary_loads_web": bool(a.get("NSAllowsArbitraryLoadsInWebContent", False)),
-        "exception_domains": list((a.get("NSExceptionDomains") or {}).keys()),
+        "allows_local_networking": bool(a.get("NSAllowsLocalNetworking", False)),
+        "exception_domains": list(exc.keys()),
+        "exception_details": details,
         "pinned_domains": list((a.get("NSPinnedDomains") or {}).keys()),
     }
 
@@ -429,6 +466,10 @@ def security_score(report: dict) -> dict:
     if highs:
         cut(min(30, highs * 15), f"{highs} high-severity secret finding(s)")
 
+    vuln_deps = sum(1 for d in (report.get("dependencies") or []) if d.get("cves"))
+    if vuln_deps:
+        cut(min(30, vuln_deps * 10), f"{vuln_deps} dependency(ies) with known CVEs")
+
     score = max(0, min(100, score))
     grade = ("A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60
              else "D" if score >= 40 else "F")
@@ -469,13 +510,174 @@ def _strings_of(bin_path: Path | None) -> bytes:
         return b""
 
 
+def dependencies(zf: zipfile.ZipFile, app_dir: str) -> list[dict]:
+    """Embedded framework dependencies with versions (for CVE lookup). Reads each
+    Payload/<App>.app/Frameworks/<X>.framework/Info.plist CFBundleShortVersionString."""
+    prefix = f"{app_dir}/Frameworks/"
+    fw_dirs = sorted({c.split(prefix, 1)[1].split("/")[0]
+                      for c in zf.namelist() if prefix in c and c.split(prefix, 1)[1]})
+    out = []
+    for fw in fw_dirs:
+        if not fw.endswith(".framework"):
+            continue
+        name = fw[:-len(".framework")]
+        ver = ""
+        member = f"{prefix}{fw}/Info.plist"
+        if member in zf.namelist():
+            try:
+                info = plistlib.loads(zf.read(member))
+                ver = info.get("CFBundleShortVersionString") or info.get("CFBundleVersion") or ""
+            except Exception:  # noqa: BLE001
+                ver = ""
+        out.append({"name": name, "version": str(ver)})
+    return out
+
+
+def debuggable_findings(ents: dict) -> list[dict]:
+    """MASTG-TEST-0261: a shipping app signed with get-task-allow=true is
+    debuggable in production."""
+    if ents and ents.get("get-task-allow") is True:
+        return [{"category": "Debuggable in production (get-task-allow=true)",
+                 "severity": "high", "matches": ["get-task-allow"]}]
+    return []
+
+
+_CERT_EXTS = (".cer", ".der", ".crt", ".pem", ".p12", ".pfx", ".cert", ".pub", ".key")
+
+
+def bundled_certs(zf: zipfile.ZipFile, app_dir: str) -> list[str]:
+    """Certificate / public-key files shipped inside the app bundle. Apps that
+    pin by comparing against a bundled cert/key are a strong pinning signal, and
+    (MASTG-TEST-0064) such files can be swapped with the MITM CA to bypass."""
+    out = []
+    for n in zf.namelist():
+        if not n.startswith(f"{app_dir}/"):
+            continue
+        low = n.lower()
+        if low.endswith(_CERT_EXTS) and "/frameworks/" not in low:
+            out.append(n.split(f"{app_dir}/", 1)[1])
+    return sorted(out)[:60]
+
+
+_EXT_TYPE_NAMES = {
+    "com.apple.share-services": "Share", "com.apple.widget-extension": "Today/Widget",
+    "com.apple.widgetkit-extension": "WidgetKit", "com.apple.usernotifications.content-extension": "Notification Content",
+    "com.apple.usernotifications.service": "Notification Service", "com.apple.keyboard-service": "Custom Keyboard",
+    "com.apple.intents-service": "Siri Intents", "com.apple.intents-ui-service": "Siri Intents UI",
+    "com.apple.fileprovider-nonui": "File Provider", "com.apple.ui-services": "Action",
+    "com.apple.authentication-services-credential-provider-ui": "Credential Provider",
+    "com.apple.message-payload-provider": "iMessage", "com.apple.broadcast-services-upload": "Broadcast Upload",
+    "com.apple.watchkit": "WatchKit", "com.apple.networkextension.packet-tunnel": "Network Extension (tunnel)",
+    "com.apple.Safari.web-extension": "Safari Web Extension", "com.apple.dt.Xcode.extension.source-editor": "Xcode",
+}
+
+
+def app_extensions(zf: zipfile.ZipFile, app_dir: str) -> list[dict]:
+    """Enumerate PlugIns/*.appex app extensions: type, bundle id, and whether the
+    extension declares app-group sharing (MASTG-TECH-0170/0171). Extensions often
+    skip the containing app's defenses, so they're an under-measured surface."""
+    prefix = f"{app_dir}/PlugIns/"
+    names = sorted({c.split(prefix, 1)[1].split("/")[0]
+                    for c in zf.namelist() if prefix in c and c.split(prefix, 1)[1]})
+    out = []
+    for ax in names:
+        if not ax.endswith(".appex"):
+            continue
+        info = {}
+        try:
+            info = plistlib.loads(zf.read(f"{prefix}{ax}/Info.plist"))
+        except Exception:  # noqa: BLE001
+            pass
+        ext = info.get("NSExtension") or {}
+        point = ext.get("NSExtensionPointIdentifier", "")
+        out.append({
+            "name": ax[:-len(".appex")],
+            "bundle_id": info.get("CFBundleIdentifier", ""),
+            "type_id": point,
+            "type": _EXT_TYPE_NAMES.get(point, point or "unknown"),
+        })
+    return out
+
+
+def privacy_manifest(zf: zipfile.ZipFile, app_dir: str) -> dict:
+    """Parse PrivacyInfo.xcprivacy (app + bundled SDKs). iOS privacy manifests
+    declare tracking, tracking domains, collected data types, and required-reason
+    API usage."""
+    members = [n for n in zf.namelist() if n.endswith("PrivacyInfo.xcprivacy")]
+    app_member = f"{app_dir}/PrivacyInfo.xcprivacy"
+    tracking = False
+    tracking_domains: list[str] = []
+    collected: list[str] = []
+    accessed_apis: list[str] = []
+    sdk_manifests = 0
+    for m in members:
+        try:
+            pl = plistlib.loads(zf.read(m))
+        except Exception:  # noqa: BLE001
+            continue
+        if m != app_member:
+            sdk_manifests += 1
+        if pl.get("NSPrivacyTracking"):
+            tracking = True
+        tracking_domains += list(pl.get("NSPrivacyTrackingDomains") or [])
+        for d in pl.get("NSPrivacyCollectedDataTypes") or []:
+            t = (d or {}).get("NSPrivacyCollectedDataType")
+            if t:
+                collected.append(t.replace("NSPrivacyCollectedDataType", ""))
+        for d in pl.get("NSPrivacyAccessedAPITypes") or []:
+            t = (d or {}).get("NSPrivacyAccessedAPIType")
+            if t:
+                accessed_apis.append(t.replace("NSPrivacyAccessedAPICategory", ""))
+    return {
+        "present": app_member in members,
+        "sdk_manifests": sdk_manifests,
+        "tracking": tracking,
+        "tracking_domains": sorted(set(tracking_domains))[:40],
+        "collected_data_types": sorted(set(collected))[:40],
+        "accessed_api_types": sorted(set(accessed_apis))[:40],
+    }
+
+
+def config_findings(info: dict, ats_d: dict, priv: dict, secrets: dict) -> list[dict]:
+    """Config-derived security findings: cleartext ATS/HTTP, file sharing, and a
+    missing privacy manifest (MASTG-TEST-0321/0322/0342 + privacy)."""
+    out: list[dict] = []
+    if ats_d.get("allows_arbitrary_loads"):
+        out.append({"category": "ATS disabled globally (NSAllowsArbitraryLoads) — cleartext allowed",
+                    "severity": "high", "matches": ["NSAllowsArbitraryLoads"]})
+    insecure_doms = [d["domain"] for d in (ats_d.get("exception_details") or [])
+                     if d.get("insecure_http")]
+    if insecure_doms:
+        out.append({"category": "ATS per-domain insecure HTTP loads allowed",
+                    "severity": "medium", "matches": insecure_doms[:8]})
+    weak_tls = [f"{d['domain']} ({d['min_tls']})" for d in (ats_d.get("exception_details") or [])
+                if str(d.get("min_tls")) in ("TLSv1.0", "TLSv1.1")]
+    if weak_tls:
+        out.append({"category": "ATS per-domain weak minimum TLS version",
+                    "severity": "medium", "matches": weak_tls[:8]})
+    http_urls = sorted({u for u in (secrets.get("urls") or []) if u.startswith("http://")})
+    if http_urls:
+        out.append({"category": "Cleartext HTTP endpoint(s) referenced",
+                    "severity": "medium", "matches": http_urls[:8]})
+    summ = info.get("summary", {}) if info else {}
+    if summ.get("UIFileSharingEnabled") is True:
+        out.append({"category": "Documents exposed via iTunes/Finder file sharing (UIFileSharingEnabled)",
+                    "severity": "medium", "matches": ["UIFileSharingEnabled"]})
+    if priv and not priv.get("present"):
+        out.append({"category": "Missing app privacy manifest (PrivacyInfo.xcprivacy)",
+                    "severity": "info", "matches": ["PrivacyInfo.xcprivacy"]})
+    return out
+
+
 def analyze_ipa(ipa_path: str) -> dict:
     """Full deep-analysis report for one decrypted IPA. Best-effort per section."""
     result: dict = {"info_plist": {}, "entitlements": {}, "ats": {},
                     "frameworks": {}, "sdks": [], "secrets": {},
                     "file_tree": [], "crypto_hints": [],
                     "binary_protections": {}, "insecure_apis": [],
-                    "binary_type": "unknown", "security_score": {}, "trackers": []}
+                    "binary_type": "unknown", "security_score": {}, "trackers": [],
+                    "dependencies": [], "privacy_manifest": {}, "bundled_certs": [],
+                    "app_extensions": []}
     tmp = Path(tempfile.mkdtemp(prefix="havva-analysis-"))
     try:
         with zipfile.ZipFile(ipa_path) as zf:
@@ -504,9 +706,26 @@ def analyze_ipa(ipa_path: str) -> dict:
             # emails + domains live alongside URLs in the secrets section
             result["secrets"].update(_safe(emails_domains, blob))
             result["binary_protections"] = _safe(checksec, bin_path)
+            result["privacy_manifest"] = _safe(privacy_manifest, zf, app_dir)
+            result["bundled_certs"] = _safe(bundled_certs, zf, app_dir)
+            result["app_extensions"] = _safe(app_extensions, zf, app_dir)
             result["insecure_apis"] = _safe(insecure_apis, blob)
+            if result["bundled_certs"]:
+                result["insecure_apis"].append({
+                    "category": "Bundled certificate/key files (possible pinning-by-cert)",
+                    "severity": "info", "matches": result["bundled_certs"][:8]})
+            result["insecure_apis"] += debuggable_findings(result["entitlements"])
+            result["insecure_apis"] += config_findings(
+                result["info_plist"], result["ats"], result["privacy_manifest"], result["secrets"])
             result["binary_type"] = binary_type(result["frameworks"], blob)
             result["trackers"] = detect_trackers(result["secrets"])
+            # Dependency versions + known-CVE lookup (network, cached on disk).
+            result["dependencies"] = _safe(dependencies, zf, app_dir)
+            try:
+                from . import cve
+                result["dependencies"] = cve.enrich(result["dependencies"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("CVE enrich failed: %s", e)
             result["security_score"] = security_score(result)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -534,6 +753,10 @@ def analyze_one(db: Database, app_id: str, log_fn=None) -> dict:
     _log(f"analyzing {ipa}\n")
     report = analyze_ipa(ipa)
     db.save_analysis(app_id, report)
+    # Backfill the bundle id from the Info.plist (the crawl often lacks it).
+    bid = (report.get("info_plist", {}).get("summary", {}) or {}).get("CFBundleIdentifier")
+    if bid:
+        db.set_bundle_id(app_id, bid)
     n_sec = len(report["secrets"].get("findings", []))
     _log(f"done: {len(report['sdks'])} SDKs, {len(report['frameworks'].get('embedded', []))} "
          f"frameworks, {n_sec} secret findings, {len(report['file_tree'])} files\n")
