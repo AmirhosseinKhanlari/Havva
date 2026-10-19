@@ -41,6 +41,23 @@ _IAP_TEXT_PATTERNS = [
     r"Compras\s*(en|dentro de)\s*la\s*app",           # es
     r"Acquisti\s*in[\-‐‑]?app",             # it
     r"Покупки\s*в\s*приложении",       # ru
+    r"App\s*內購買", r"應用程式內購買",       # zh-Hant (tw/hk)
+    r"Compras\s*(dentro\s*do|na)\s*app", r"Compras\s*integradas",   # pt-BR / pt-PT
+    r"In[\-‐‑ ]?app[\-‐‑ ]?aankopen",      # nl
+    r"Uygulama\s*[İIiı]çi\s*Satın\s*Al[ıi]m",   # tr
+    r"(?:عمليات\s*)?شراء\s*داخل\s*التطبيق", r"مشتريات\s*داخل\s*التطبيق",   # ar
+    r"Pembelian\s*Dalam\s*Aplikasi",       # id
+    r"Köp\s*inuti\s*appen", r"Köp\s*i\s*appen",          # sv
+    r"Køb\s*i\s*appen", r"Kjøp\s*i\s*appen",             # da / no
+    r"Sovelluksen\s*sisäiset\s*ostot",     # fi
+    r"Zakupy\s*w\s*aplikacji",             # pl
+    r"Покупки\s*в\s*застосунку",           # uk
+    r"การซื้อภายในแอป",                    # th
+    r"Mua\s*hàng\s*trong\s*ứng\s*dụng",     # vi
+    r"ऐप\s*के\s*अंदर\s*खरीदारी",              # hi
+    r"Αγορές\s*εντός\s*εφαρμογής",         # el
+    r"Nákupy\s*v\s*aplikaci", r"Nákupy\s*v\s*aplikácii",   # cs / sk
+    r"Alkalmazáson\s*belüli\s*vásárlások",  # hu
 ]
 _IAP_RE = re.compile("|".join(_IAP_TEXT_PATTERNS), re.IGNORECASE)
 # The app's own info line: <p class="attributes ...">Free · In-App Purchases</p>.
@@ -52,36 +69,53 @@ _DT_RE = re.compile(r'<dt[^>]*>\s*(?:' + "|".join(_IAP_TEXT_PATTERNS) + r')',
                     re.IGNORECASE)
 
 
+def parse_has_iap(html: str) -> bool | None:
+    """Pure page parser. True when the app's own info line or info-list row
+    carries the (localized) In-App Purchases label; False when the page is a
+    recognizable product page without it; None when the HTML has neither an
+    attributes paragraph nor an info list (not a product page: do not decide).
+
+    A plain full-page search is contaminated by the always-present JSON key
+    "inAppPurchases" and the related-apps section, so we look only inside the
+    <p class="attributes"> paragraphs (there are several: device support, price
+    line, ...; the IAP label lives in the price line) AND the info-list <dt> row.
+    Both are checked before deciding False: never short-circuit on the first."""
+    attrs = _ATTR_P_RE.findall(html or "")
+    if any(_IAP_RE.search(a) for a in attrs):
+        return True
+    if _DT_RE.search(html or ""):
+        return True
+    if attrs or re.search(r"<dt[\s>]", html or "", re.IGNORECASE):
+        return False
+    return None
+
+
 def check_has_iap(app_id: str, country: str, session: requests.Session | None = None) -> bool | None:
-    """True/False if determined, None on fetch failure (retry later)."""
-    url = f"https://apps.apple.com/{country.lower()}/app/id{app_id}"
+    """True/False if determined, None if unknown (fetch failure, non-200 page,
+    unrecognized page layout): None rows stay iap_checked=0 and are retried.
+    The page is requested with ?l=en so the label is English on every
+    storefront; the localized patterns remain as a fallback."""
+    url = f"https://apps.apple.com/{country.lower()}/app/id{app_id}?l=en"
     getter = session or requests
     html = ""
     for attempt in range(3):
         try:
             r = getter.get(url, headers=_HEADERS, timeout=20)
-            if r.status_code == 404:
-                return False
             if r.status_code in (429, 403, 503):  # throttled: back off and retry
                 time.sleep(2 * (attempt + 1))
                 continue
-            r.raise_for_status()
+            if r.status_code != 200:
+                # 404 (pulled / wrong storefront) or any other non-200 is NOT
+                # "no IAP": record nothing so the app is retried later.
+                log.info("iap %s/%s: HTTP %s -> unknown", country, app_id, r.status_code)
+                return None
             html = r.text
             break
         except requests.RequestException:
             time.sleep(1.5 * (attempt + 1))
     if not html:
         return None
-    # Scope to the app's own info line. A plain full-page search is contaminated
-    # by the always-present JSON key "inAppPurchases" and the related-apps
-    # section, so we look only inside the <p class="attributes"> paragraph, with
-    # the info-list <dt> row as a fallback.
-    # There are several "attributes" paragraphs (device support, price line, ...);
-    # the IAP label lives in the price line, so check them all.
-    attrs = _ATTR_P_RE.findall(html)
-    if attrs:
-        return any(_IAP_RE.search(a) for a in attrs)
-    return bool(_DT_RE.search(html))
+    return parse_has_iap(html)
 
 
 def _check_chunk(rows, workers: int, session) -> list[tuple[str, bool | None]]:
@@ -147,6 +181,6 @@ def _flush(db: Database, results: list[tuple[str, bool | None]]) -> None:
     with db.connect() as c:
         for app_id, has in results:
             if has is None:
-                continue  # leave unchecked for retry
+                continue  # unknown (error / non-200 / unparsable): leave iap_checked=0 for retry
             c.execute("UPDATE apps SET has_iap=?, iap_checked=1 WHERE app_id=?",
                       (1 if has else 0, app_id))

@@ -1,6 +1,8 @@
 """Corpus browser: searchable, multi-field filterable, paginated app table."""
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import Response
 
@@ -28,7 +30,7 @@ def corpus(request: Request, page: int = 1, _: None = Depends(require_auth)):
         "pages": max(1, (total + PAGE - 1) // PAGE),
         "f": f, "opts": db.filter_options(), "nav": "corpus",
         # querystring for pagination links (filters minus page)
-        "qs": "&".join(f"{k}={v}" for k, v in f.items() if v),
+        "qs": urlencode([(k, v) for k, v in f.items() if v]),
     }
     if request.headers.get("HX-Request"):
         return templates.TemplateResponse(request, "_corpus_table.html", ctx)

@@ -46,28 +46,48 @@ def compute(db: Database) -> dict:
             "FROM apps a JOIN static_profile s ON s.app_id=a.app_id "
             "WHERE s.static_state=1 GROUP BY a.primary_category")}
 
-        # Dynamic outcomes.
+        # Dynamic outcomes. POPULATION for every bypass rate: the TESTED pinned
+        # apps, i.e. outcome rows with pinned=1 AND work_state!=0. Numerator and
+        # denominator both come from that set (an app whose dynamic run is still
+        # UNTESTED is neither a bypass nor a non-bypass; it is not counted at all).
         outcomes = {r["label"]: r["n"] for r in c.execute(
             "SELECT label, COUNT(*) n FROM outcome WHERE work_state!=0 GROUP BY label")}
+        pinned_outcomes = {r["label"]: r["n"] for r in c.execute(
+            "SELECT label, COUNT(*) n FROM outcome WHERE pinned=1 AND work_state!=0 "
+            "GROUP BY label")}
         bypass_cost = {r["bypass_cost"]: r["n"] for r in c.execute(
-            "SELECT bypass_cost, COUNT(*) n FROM outcome WHERE pinned=1 GROUP BY bypass_cost")}
+            "SELECT bypass_cost, COUNT(*) n FROM outcome WHERE pinned=1 AND work_state!=0 "
+            "GROUP BY bypass_cost")}
         dyn_evaluated = sum(outcomes.values())
-        bypassed = outcomes.get("bypassed", 0) + outcomes.get("partial", 0)
-        dyn_pinned = scalar("SELECT COUNT(*) FROM outcome WHERE pinned=1")
+        dyn_pinned_tested = sum(pinned_outcomes.values())
+        bypassed = pinned_outcomes.get("bypassed", 0) + pinned_outcomes.get("partial", 0)
+        dyn_pinned_untested = scalar(
+            "SELECT COUNT(*) FROM outcome WHERE pinned=1 AND work_state=0")
 
-        # Attestation adoption vs enforcement (the headline).
+        # Attestation adoption vs enforcement (the headline). Graded verdicts
+        # (probe battery) are authoritative when present; PARTIAL_COVERAGE is
+        # reported as its own "partial" bucket, never folded into fail_open
+        # ("theater"), since those backends DO verify on the endpoints they
+        # cover. The coarse backend_behavior column is kept for compatibility.
         appattest = scalar("SELECT COUNT(*) FROM static_profile WHERE appattest_flag=1")
         att_tested = scalar("SELECT COUNT(*) FROM attestation WHERE work_state!=0")
-        fail_open = scalar("SELECT COUNT(*) FROM attestation WHERE backend_behavior='fail_open'")
-        fail_closed = scalar("SELECT COUNT(*) FROM attestation WHERE backend_behavior='fail_closed'")
-        # Graded enforcement verdicts (added by the probe battery; may be absent).
         verdicts: dict[str, int] = {}
         try:
             verdicts = {r["verdict"]: r["n"] for r in c.execute(
                 "SELECT verdict, COUNT(*) n FROM attestation WHERE verdict IS NOT NULL "
-                "GROUP BY verdict")}
+                "AND work_state!=0 GROUP BY verdict")}
         except Exception:
             verdicts = {}
+        partial = verdicts.get("partial_coverage", 0)
+        if verdicts:
+            fail_closed = verdicts.get("enforced", 0)
+            fail_open = sum(n for v, n in verdicts.items()
+                            if v not in ("enforced", "partial_coverage", "inconclusive"))
+        else:
+            fail_open = scalar("SELECT COUNT(*) FROM attestation WHERE backend_behavior='fail_open' "
+                               "AND work_state!=0")
+            fail_closed = scalar("SELECT COUNT(*) FROM attestation WHERE backend_behavior='fail_closed' "
+                                 "AND work_state!=0")
 
     return {
         "corpus": {"total_apps": total_apps, "static_analyzed": static_done},
@@ -78,15 +98,21 @@ def compute(db: Database) -> dict:
         },
         "bypass": {
             "dynamic_evaluated": dyn_evaluated, "outcomes": outcomes,
+            # population = pinned apps with a decided (work_state != 0) outcome
+            "pinned_tested": dyn_pinned_tested,
+            "pinned_untested_excluded": dyn_pinned_untested,
+            "pinned_outcomes": pinned_outcomes,
             "bypassed": bypassed,
-            "bypass_rate_pct_of_pinned_evaluated": _pct(bypassed, dyn_pinned) if dyn_pinned else 0.0,
+            "bypass_rate_pct_of_pinned_evaluated": _pct(bypassed, dyn_pinned_tested),
             "bypass_cost_distribution": bypass_cost,
         },
         "attestation": {
             "adopted": appattest, "adopted_pct_of_analyzed": _pct(appattest, static_done),
             "tested": att_tested, "fail_open": fail_open, "fail_closed": fail_closed,
+            "partial": partial,
             "enforced_pct_of_tested": _pct(fail_closed, att_tested),
             "not_enforced_pct_of_tested": _pct(fail_open, att_tested),
+            "partial_pct_of_tested": _pct(partial, att_tested),
             "enforcement_verdicts": verdicts,
         },
     }
@@ -100,10 +126,12 @@ def _markdown(m: dict) -> str:
         f"{m['corpus']['static_analyzed']} statically analyzed",
         f"- Pinning prevalence: {p['pinned']} ({p['pinned_pct_of_analyzed']}% of analyzed)",
         f"- Dynamic evaluated: {b['dynamic_evaluated']}; bypassed: {b['bypassed']} "
-        f"({b['bypass_rate_pct_of_pinned_evaluated']}% of pinned evaluated)",
+        f"({b['bypass_rate_pct_of_pinned_evaluated']}% of {b['pinned_tested']} pinned apps "
+        f"with a decided outcome; {b['pinned_untested_excluded']} pinned still untested, excluded)",
         f"- App Attest adopted: {a['adopted']} ({a['adopted_pct_of_analyzed']}% of analyzed)",
         f"- Attestation enforcement (of {a['tested']} tested): "
-        f"{a['enforced_pct_of_tested']}% enforced, {a['not_enforced_pct_of_tested']}% theater",
+        f"{a['enforced_pct_of_tested']}% enforced, {a['partial_pct_of_tested']}% partial "
+        f"coverage, {a['not_enforced_pct_of_tested']}% theater",
         "", "## Outcome distribution",
     ]
     for k, v in sorted(b["outcomes"].items()):

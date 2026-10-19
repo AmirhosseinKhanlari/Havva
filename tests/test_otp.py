@@ -1,5 +1,6 @@
 """Unit tests for the pure OTP parsing/selection (no Gmail / network)."""
-from pipeline.otp import _extract_code, _select_message
+from pipeline.otp import (CLOCK_SKEW_MS, _candidate_messages, _extract_code,
+                          _first_code, _select_message)
 
 
 def test_google_g_code():
@@ -44,8 +45,9 @@ def test_select_newest_after():
 
 
 def test_select_filters_out_before_after():
+    # older than `after` by more than the clock-skew margin -> excluded
     msgs = [{"internalDate": "100", "from": "a", "body": "x"}]
-    assert _select_message(msgs, 200) is None
+    assert _select_message(msgs, 200 + CLOCK_SKEW_MS) is None
 
 
 def test_select_sender_filter():
@@ -57,3 +59,40 @@ def test_select_sender_filter():
 
 def test_select_empty():
     assert _select_message([], 0) is None
+
+
+# ---- audit fixes: year filter on the keyword path, "pin", newest-first walk ----
+
+def test_keyword_path_skips_four_digit_year():
+    assert _extract_code("Use 1234 to verify. Sent at 2024") == "1234"
+    # keyword directly before a year: skip it and keep looking
+    assert _extract_code("Your code (c) 2024: 5566") == "5566"
+    assert _extract_code("Verification sent 2025") is None
+
+
+def test_pin_keyword():
+    assert _extract_code("Your account PIN is 4821.") == "4821"
+
+
+def test_first_code_walks_past_unrelated_newer_message():
+    msgs = [{"internalDate": "300", "from": "voice", "body": "Thanks for signing up!"},
+            {"internalDate": "200", "from": "voice", "body": "Your code is 778899"}]
+    # the newest message has no code; the older one must still be used
+    assert _first_code(msgs, 100) == "778899"
+    # ...while _select_message still reports the newest for callers that need it
+    assert _select_message(msgs, 100)["internalDate"] == "300"
+
+
+def test_first_code_prefers_newest_with_code():
+    msgs = [{"internalDate": "200", "from": "v", "body": "code 111111"},
+            {"internalDate": "300", "from": "v", "body": "code 222222"}]
+    assert _first_code(msgs, 0) == "222222"
+
+
+def test_clock_skew_margin_on_after():
+    after = 1_000_000
+    msgs = [{"internalDate": str(after - CLOCK_SKEW_MS + 1), "from": "v", "body": "code 4455"}]
+    assert _first_code(msgs, after) == "4455"
+    too_old = [{"internalDate": str(after - CLOCK_SKEW_MS - 1), "from": "v", "body": "code 4455"}]
+    assert _first_code(too_old, after) is None
+    assert _candidate_messages(too_old, after) == []

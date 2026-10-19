@@ -32,7 +32,7 @@
     try{ if(window.Notification && Notification.permission==='granted'){
       new Notification('Havva — {{ job['kind'] }} {{ job['state'] }}', {body:'{{ job['target'] }}'});
     }}catch(e){}
-    {% if reload %}setTimeout(function(){ try{ htmx.ajax('GET','{{ reload|safe }}',{target:'#tab-content',swap:'innerHTML'}); }catch(e){} }, 3500);{% endif %}
+    {% if reload %}setTimeout(function(){ try{ htmx.ajax('GET',{{ reload|tojson }},{target:'#tab-content',swap:'innerHTML'}); }catch(e){} }, 3500);{% endif %}
   })();</script>
   {% endif %}
 </div>

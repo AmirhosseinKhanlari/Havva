@@ -69,6 +69,10 @@ def jobs_watch(job_id: int, request: Request, reload: str = "",
     if not job:
         job = {"id": job_id, "kind": "job", "target": "", "state": "failed",
                "progress_pct": 0, "log": ""}
+    # Only a same-origin path may be reloaded into the tab (no "//evil", no
+    # "javascript:", no absolute URLs).
+    if not (reload.startswith("/") and not reload.startswith("//")):
+        reload = ""
     # The poll updates only the status bar; the log console (in _job_watch) persists.
     return templates.TemplateResponse(request, "_job_status.html",
                                       {"request": request, "job": job, "reload": reload,

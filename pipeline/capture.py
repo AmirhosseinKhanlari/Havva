@@ -90,8 +90,11 @@ def app_hosts(flows: list[Flow], excluded: list[str] | None = None) -> set[str]:
     return {f.host for f in flows if f.host and not is_excluded(f.host, excluded)}
 
 
-def reached_any_network(flows: list[Flow]) -> bool:
-    return any(f.host for f in flows)
+def reached_any_network(flows: list[Flow], excluded: list[str] | None = None) -> bool:
+    """Did the app reach any NON-excluded host? Apple/iCloud/CDN background
+    traffic is always present on the device, so counting every host would make
+    this trivially True and let a tamper exit masquerade as 'ran'."""
+    return any(f.host and not is_excluded(f.host, excluded) for f in flows)
 
 
 # ---- Proxyman control (I/O) -------------------------------------------------
@@ -108,6 +111,8 @@ def export_har(path: Path, retries: int = 3) -> bool:
     """Export the current session to HAR. Proxyman's CLI sometimes reports a
     timeout but writes the file anyway, so we check the file, not the exit code."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Never let a failed export silently hand back the PREVIOUS run's file.
+    path.unlink(missing_ok=True)
     for _ in range(retries):
         run_cmd([_cli(), "export-log", "-f", "har", "-o", str(path)], timeout=30)
         if path.exists() and path.stat().st_size > 0:
@@ -145,12 +150,28 @@ def export_session(path: Path, retries: int = 3) -> Path | None:
     """Export the current session in native (.proxymansession) format. Proxyman
     appends a version suffix (e.g. 'v2'), so return the file it actually wrote."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Remove the previous run's file(s) first, and only accept a file whose
+    # mtime is at/after the export started, so a failed export can never hand
+    # back a stale session. int() floors the timestamp for 1s-resolution FSs.
+    started = int(time.time())
+    for stale in list(path.parent.glob(path.name + "*")) + [path]:
+        try:
+            if stale.is_file():
+                stale.unlink()
+        except OSError:
+            pass
+
+    def _fresh(p: Path) -> bool:
+        try:
+            st = p.stat()
+        except OSError:
+            return False
+        return st.st_size > 0 and st.st_mtime >= started
 
     def _written() -> Path | None:
-        if path.exists() and path.stat().st_size > 0:
+        if _fresh(path):
             return path
-        hits = sorted(path.parent.glob(path.name + "*"))
-        hits = [h for h in hits if h.stat().st_size > 0]
+        hits = sorted(h for h in path.parent.glob(path.name + "*") if _fresh(h))
         return hits[-1] if hits else None
 
     for _ in range(retries):
@@ -162,37 +183,62 @@ def export_session(path: Path, retries: int = 3) -> Path | None:
     return _written()
 
 
+_TLS_FAILURE_MARKERS = ("tls", "handshake", "certificate", "ssl")
+_DNS_FAILURE_MARKERS = ("dns", "resolve")
+# Orderly TLS close alerts are not handshake failures.
+_BENIGN_TLS_MARKERS = ("close_notify", "close notify")
+
+
 def _classify_trace(trace: dict) -> tuple[str, str]:
     """Classify one ConnectionTrace -> (host, outcome). Outcomes:
-      decrypted  : TLS MITM handshake completed -> we saw plaintext.
-      pinned     : TCP connected + TLS started, but the client aborted the
-                   handshake before completion (no DNS/connect failure) ->
-                   the app rejected our CA (pinning our MITM couldn't break).
-      unresolved : DNS could not resolve the host (dead / sinkholed endpoint).
-      connect_failed : reached DNS but never established a TCP connection.
-      unknown    : none of the above.
+      decrypted  : upstream TLS completed and the connection did not fail.
+      pinned     : state is 'failed' AND the failure reason (error-event detail)
+                   names TLS / handshake / certificate / SSL and is not a DNS
+                   error or an orderly close_notify. Weak signal, see below.
+      unresolved : the trace has no 'resolved' DNS event at all.
+      connect_failed : resolved, but failed before a TCP connection existed.
+      unknown    : none of the above (incl. failed-after-TLS-complete, e.g. the
+                   ubiquitous 'uncleanShutdown').
+
+    LIMITATION: ConnectionTraces describe Proxyman's UPSTREAM leg (Mac -> origin
+    server), not the client leg (app -> Proxyman), and carry no client
+    attribution. An app that rejects our CA aborts its own handshake with
+    Proxyman; upstream that merely looks like a connection Proxyman closed
+    early ('uncleanShutdown' / 'closed'), which is indistinguishable from a
+    normal short-lived connection or another app's traffic on the same device
+    IP. So classification is deliberately conservative: a trace is never
+    'decrypted' when its state is 'failed', and 'pinned' requires an explicit
+    TLS-flavoured failure reason. Treat 'pinned' as a lead, not a verdict.
     """
     host = (trace.get("resolvedHost") or trace.get("host") or "").lower()
     events = trace.get("events", []) or []
     kinds = [e.get("kind") for e in events]
-    details = " ".join(str(e.get("detail", "")) for e in events).lower()
-
-    tls_complete = "tlsComplete" in kinds
-    tls_started = "tlsMessage" in kinds
-    connected = "connected" in kinds
-    had_error = "error" in kinds
-    dns_failed = ("resolve" in details or "dns error" in details) and not connected
+    state = str(trace.get("state") or "").lower()
+    failed = state == "failed"
+    # Only the failure reason(s), NOT every tlsMessage's "handshake" detail.
+    err_text = " ".join(str(e.get("detail", "")) for e in events
+                        if e.get("kind") == "error").lower()
 
     if not host:
         return "", "unknown"
-    if tls_complete:
-        return host, "decrypted"
-    if dns_failed:
+    if not events:
+        return host, "unknown"
+    if "resolved" not in kinds:
         return host, "unresolved"
-    if connected and tls_started and not tls_complete:
-        # TLS negotiation began against our cert and was torn down first.
+
+    tls_complete = "tlsComplete" in kinds
+    connected = "connected" in kinds
+    had_error = "error" in kinds
+
+    if tls_complete and not failed:
+        return host, "decrypted"
+
+    dns_err = any(m in err_text for m in _DNS_FAILURE_MARKERS)
+    tls_err = (any(m in err_text for m in _TLS_FAILURE_MARKERS)
+               and not any(m in err_text for m in _BENIGN_TLS_MARKERS))
+    if failed and tls_err and not dns_err:
         return host, "pinned"
-    if not connected and had_error:
+    if not connected and (had_error or failed):
         return host, "connect_failed"
     return host, "unknown"
 
@@ -220,9 +266,12 @@ def session_host_outcomes(path: str | Path,
                           excluded: list[str] | None = None) -> dict[str, str]:
     """Aggregate per-host outcome across a session's connections. A host with
     any decrypted connection is 'decrypted'; else 'pinned' if any connection was
-    a pinning abort; else 'unresolved'/'connect_failed'/'unknown'. Excluded
-    (Apple/CDN) hosts are dropped -- they are tunneled by our exclude list, not
-    pinned by the app."""
+    a TLS-flavoured failure; else 'connect_failed'/'unresolved'/'unknown'.
+    Excluded (Apple/CDN) hosts are dropped -- they are tunneled by our exclude
+    list, not pinned by the app.
+
+    See _classify_trace for the big caveat: traces are the upstream leg with no
+    client attribution, so 'pinned' here is a lead to confirm, not proof."""
     priority = {"decrypted": 4, "pinned": 3, "connect_failed": 2,
                 "unresolved": 1, "unknown": 0}
     best: dict[str, str] = {}

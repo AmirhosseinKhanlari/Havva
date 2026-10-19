@@ -102,7 +102,8 @@ def _app_or_404(app_id: str):
 _TAB_JOB_KINDS = {"acquire": ("acquire",),
                   "static": ("static", "deep_analyze"),
                   "dynamic": ("dynamic",),
-                  "iap": ("iap",)}
+                  "iap": ("iap",),
+                  "attest": ("attest", "attest_detect")}
 
 
 def _tab_context(request: Request, app_id: str, tab: str) -> dict:
@@ -120,6 +121,7 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
             ctx["active_reload"] = f"/app/{app_id}/tab/{tab}"
     if tab == "acquire":
         ctx["acq"] = db.get_acquisition(app_id)
+        ctx["acq_versions"] = db.get_acquisition_versions(app_id)
         ctx["decrypted_files"] = _decrypted_files(app_id)
     # (static branch below sets ctx["plist"] via _plist_view)
     elif tab == "static":
@@ -144,6 +146,9 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
     elif tab == "iap":
         ctx["acquired"] = _is_acquired(app_id)
         ctx["iap"] = _decode_iap(db.get_iap_bypass(app_id))
+        an = db.get_analysis(app_id)
+        ctx["iap_static"] = (_decode_analysis(an).get("iap") if an else None)
+        ctx["has_iap"] = bool(app["has_iap"]) if "has_iap" in app.keys() else None
         from ...config import CONFIG
         ctx["monitor_default"] = CONFIG.runtime.monitor_seconds
     elif tab == "attest":
@@ -229,13 +234,22 @@ def _attest_usage(db, app_id: str) -> dict | None:
     if endpoint:
         bits.append("Token observed going to: " + endpoint + ".")
 
+    launches = int(trail.get("launches") or 0)
+    crashed = bool(trail.get("crashed"))  # crash report captured this run (not launch count)
+    summary = _ATTEST_USAGE_SUMMARY.get(conf, conf)
+    if crashed:
+        summary = "App crashed on launch — possible anti-tamper or integrity enforcement."
+        bits.append("A crash report was captured during the session, so the app likely refuses "
+                    "to run re-signed; the 'not called' result is unreliable.")
+
     return {"confidence": conf,
-            "summary": _ATTEST_USAGE_SUMMARY.get(conf, conf),
+            "summary": summary,
             "detail": " ".join(bits),
             "methods": methods, "endpoint": endpoint, "tooling_ok": tooling_ok,
             "calls_table": calls_table, "requests": requests,
             "aa_status": aa_status, "aa_color": aa_color,
-            "dc_status": dc_status, "dc_color": dc_color, "used": used}
+            "dc_status": dc_status, "dc_color": dc_color, "used": used,
+            "crashed": crashed, "launches": launches}
 
 
 def _decode_iap(row) -> dict | None:
@@ -290,11 +304,28 @@ def _decode_analysis(row) -> dict:
               "secrets", "file_tree", "crypto_hints", "binary_protections",
               "insecure_apis", "binary_type", "security_score", "trackers",
               "dependencies", "privacy_manifest", "bundled_certs",
-              "app_extensions", "ats_gap"):
+              "app_extensions", "ats_gap", "iap"):
         try:
             out[k] = json.loads(row[k]) if row[k] else None
         except Exception:
             out[k] = None
+    # Dependencies: normalize `cves` to a list and precompute its length so the
+    # template can sort on a scalar (sorting on the list itself 500s with >=2
+    # vulnerable deps, since dicts are not orderable).
+    deps = out.get("dependencies")
+    if isinstance(deps, list):
+        norm = []
+        for d in deps:
+            if not isinstance(d, dict):
+                continue
+            d = dict(d)
+            cves = d.get("cves")
+            d["cves"] = cves if isinstance(cves, list) else []
+            d["n_cves"] = len(d["cves"])
+            norm.append(d)
+        out["dependencies"] = norm
+    else:
+        out["dependencies"] = None
     out["analyzed_at"] = row["analyzed_at"]
     return out
 
@@ -456,21 +487,41 @@ def act_versions(app_id: str, request: Request, _: None = Depends(require_auth))
 
 @router.get("/app/{app_id}/download")
 def act_download(app_id: str, file: str = "", _: None = Depends(require_auth)):
-    from ...config import CONFIG
     if file:
         # Serve a specific decrypted file (must belong to this app, no traversal).
-        base = os.path.basename(file)
-        if base != f"{app_id}.decrypted.ipa" and not base.startswith(f"{app_id}-v"):
-            raise HTTPException(status_code=400, detail="bad file")
-        path = os.path.join(str(CONFIG.paths.ipa_dir), base)
+        base = _owned_ipa_name(app_id, file)
+        path = os.path.join(_ipa_dir(), base)
         if not os.path.exists(path):
             raise HTTPException(status_code=404, detail="file not found")
         return FileResponse(path, filename=base, media_type="application/octet-stream")
     ac = get_db().get_acquisition(app_id)
-    if not ac or not ac["ipa_path"] or not os.path.exists(ac["ipa_path"]):
+    path = _abs_ipa_path(ac["ipa_path"]) if ac and ac["ipa_path"] else ""
+    if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="no decrypted IPA for this app")
-    return FileResponse(ac["ipa_path"], filename=os.path.basename(ac["ipa_path"]),
+    return FileResponse(path, filename=os.path.basename(path),
                         media_type="application/octet-stream")
+
+
+def _owned_ipa_name(app_id: str, file: str) -> str:
+    """The bare file name of a decrypted IPA that belongs to `app_id`
+    ({app_id}.decrypted.ipa or {app_id}-v<ver>.decrypted.ipa); 400 otherwise."""
+    base = os.path.basename(file or "")
+    ok = (base == f"{app_id}.decrypted.ipa"
+          or (base.startswith(f"{app_id}-v") and base.endswith(".decrypted.ipa")))
+    if not ok or "/" in base or ".." in base:
+        raise HTTPException(status_code=400, detail="bad file")
+    return base
+
+
+def _abs_ipa_path(p: str) -> str:
+    """Resolve a stored ipa_path (possibly relative) against the project root,
+    the same way the listing does."""
+    from ...config import CONFIG
+    if not p:
+        return ""
+    if os.path.isabs(p):
+        return p
+    return str(CONFIG.paths.root / p)
 
 
 @router.post("/app/{app_id}/classify")
@@ -492,27 +543,30 @@ def act_classify(app_id: str, request: Request, _: None = Depends(require_auth))
 def act_remove(app_id: str, request: Request, file: str = Form(...),
                _: None = Depends(require_auth)):
     """Delete one decrypted IPA for this app, then re-render the Acquire tab."""
-    from ...config import CONFIG
     from ...models import WorkState
-    base = os.path.basename(file)
-    if base != f"{app_id}.decrypted.ipa" and not base.startswith(f"{app_id}-v"):
-        raise HTTPException(status_code=400, detail="bad file")
-    path = os.path.join(str(CONFIG.paths.ipa_dir), base)
+    base = _owned_ipa_name(app_id, file)
+    ipa_dir = _ipa_dir()
+    path = os.path.join(ipa_dir, base)
     if os.path.exists(path):
         try:
             os.remove(path)
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"could not remove: {e}")
-    # Keep the acquisition row consistent with what's left on disk.
+    # Keep the acquisition rows consistent with what's left on disk.
     db = get_db()
     remaining = _decrypted_files(app_id)
     ac = db.get_acquisition(app_id)
     if ac and os.path.basename(ac["ipa_path"] or "") == base:
-        if remaining:
+        current = [f for f in remaining if f["version"] == "current"]
+        if current:
             db.save_acquisition(app_id, WorkState.POSITIVE,
-                                ipa_path=os.path.join(str(CONFIG.paths.ipa_dir), remaining[0]["name"]))
+                                ipa_path=os.path.join(ipa_dir, current[0]["name"]))
         else:
             db.delete_acquisition(app_id)
+    for v in db.get_acquisition_versions(app_id):
+        if v["ipa_path"] and os.path.basename(v["ipa_path"]) == base:
+            db.save_acquisition_version(app_id, v["version_id"], WorkState.UNTESTED,
+                                        ipa_path="", error="removed from disk")
     return templates.TemplateResponse(request, "_tab_acquire.html",
                                       _tab_context(request, app_id, "acquire"))
 
@@ -570,14 +624,19 @@ def act_sbom(app_id: str, _: None = Depends(require_auth)):
 
 
 @router.post("/app/{app_id}/dynamic")
-def act_dynamic(app_id: str, request: Request, _: None = Depends(require_auth)):
+async def act_dynamic(app_id: str, request: Request, _: None = Depends(require_auth)):
     row = _app_or_404(app_id)
+    form = await request.form()
+    entshim = form.get("entshim") == "on"
 
     def job(ctx):
         from ... import device, dynamic
         with tee_pipeline_logs(ctx):
+            if entshim:
+                ctx.log("entitlement-shim injected (swallows re-sign entitlement-loss crashes)\n")
             driver = device.default_driver()
-            label = dynamic.process_app(get_db(), row, driver)
+            label = dynamic.process_app(get_db(), row, driver, entshim=entshim,
+                                        stop_check=lambda: ctx.cancelled)
             ctx.log(f"outcome: {getattr(label, 'value', label)}\n")
 
     jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True)
@@ -594,8 +653,20 @@ async def act_dynamic_custom(app_id: str, request: Request, _: None = Depends(re
     sign_env = form.get("sign_env") or "dist"
     monitor_seconds = _parse_secs(form.get("monitor_seconds"))
     swap_certs = form.get("swap_certs") == "on"
+    if form.get("entshim") == "on" and "entshim" not in dylib_ids:
+        dylib_ids = [*dylib_ids, "entshim"]
     if not dylib_ids:
         raise HTTPException(status_code=400, detail="select at least one dylib")
+    # Only catalog ids are valid: the ids end up in the build label (a work-dir
+    # name that gets rmtree'd), so anything else is rejected outright.
+    from ... import instrument
+    valid = {it["id"] for it in instrument.dylib_catalog()}
+    unknown = [d for d in dylib_ids if d not in valid]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown dylib id(s): {', '.join(map(str, unknown))}")
+    dylib_ids = list(dict.fromkeys(dylib_ids))     # de-dup, keep order
+    if sign_env not in ("dev", "dist"):
+        raise HTTPException(status_code=400, detail="sign_env must be dev or dist")
 
     def job(ctx):
         from ... import device, dynamic
@@ -605,7 +676,8 @@ async def act_dynamic_custom(app_id: str, request: Request, _: None = Depends(re
             driver = device.default_driver()
             run = dynamic.run_custom(get_db(), row, driver, list(dylib_ids),
                                      aliased=aliased, sign_env=sign_env,
-                                     monitor_seconds=monitor_seconds, swap_certs=swap_certs)
+                                     monitor_seconds=monitor_seconds, swap_certs=swap_certs,
+                                     stop_check=lambda: ctx.cancelled)
             ctx.log(f"outcome: hosts={len(run.hosts)} crashed={run.crashed} "
                     f"reached_network={run.reached_network}\n")
 
@@ -626,17 +698,26 @@ async def act_dynamic_pinning(app_id: str, request: Request, _: None = Depends(r
     sign_env = form.get("sign_env") or "dist"
     monitor_seconds = _parse_secs(form.get("monitor_seconds"))
     swap_certs = form.get("swap_certs") == "on"
+    login = form.get("login") == "on"
+    entshim = form.get("entshim") == "on"
 
     def job(ctx):
         from ... import device, dynamic
         with tee_pipeline_logs(ctx):
             ctx.log(f"SSL-pinning probe ({sign_env} signing, {monitor_seconds or 'default'}s window"
-                    f"{', cert-swap' if swap_certs else ''}): "
+                    f"{', cert-swap' if swap_certs else ''}{', UI login' if login else ''}"
+                    f"{', entitlement-shim' if entshim else ''}): "
                     "2 MITM runs (clean baseline, then SSL Kill Switch)\n")
             driver = device.default_driver()
             res = dynamic.detect_pinning(get_db(), row, driver, aliased=aliased,
                                          sign_env=sign_env, monitor_seconds=monitor_seconds,
-                                         swap_certs=swap_certs)
+                                         swap_certs=swap_certs, login=login, entshim=entshim,
+                                         stop_check=lambda: ctx.cancelled)
+            if res.get("crashed"):
+                ctx.log("verdict: TAMPER_DETECTED — the app crashed/exited on launch when "
+                        "re-signed (anti-tamper / integrity enforcement). Cannot MITM it to "
+                        "test pinning; skipped the bypass run.\n")
+                return
             tag = "" if res["reliable"] else " (open/bypassed split UNRELIABLE: clean run did not launch)"
             ctx.log(f"bypassable-pinned: {len(res['pinned'])} | "
                     f"hard-pinned: {len(res['hard_pinned'])} | "
@@ -659,14 +740,16 @@ async def act_dynamic_sideload(app_id: str, request: Request, _: None = Depends(
     form = await request.form()
     sign_env = form.get("sign_env") or "dist"
     monitor_seconds = _parse_secs(form.get("monitor_seconds"))
+    entshim = form.get("entshim") == "on"
 
     def job(ctx):
         from ... import dynamic
         with tee_pipeline_logs(ctx):
-            ctx.log(f"sideload-detection probe ({sign_env} signing, {monitor_seconds or 'default'}s): "
+            ctx.log(f"sideload-detection probe ({sign_env} signing, {monitor_seconds or 'default'}s"
+                    f"{', entitlement-shim' if entshim else ''}): "
                     "plain re-sign (control) vs SideloadFix\n")
             res = dynamic.detect_sideload(get_db(), row, sign_env=sign_env,
-                                          monitor_seconds=monitor_seconds)
+                                          monitor_seconds=monitor_seconds, entshim=entshim)
             ctx.log(f"verdict: {res['verdict']} — {res['note']}\n")
 
     jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True,
@@ -682,14 +765,16 @@ async def act_dynamic_storage(app_id: str, request: Request, _: None = Depends(r
     form = await request.form()
     sign_env = form.get("sign_env") or "dev"
     monitor_seconds = _parse_secs(form.get("monitor_seconds"))
+    entshim = form.get("entshim") == "on"
 
     def job(ctx):
         from ... import dynamic
         with tee_pipeline_logs(ctx):
-            ctx.log(f"data-storage inspection ({sign_env} signing, {monitor_seconds or 'default'}s): "
+            ctx.log(f"data-storage inspection ({sign_env} signing, {monitor_seconds or 'default'}s"
+                    f"{', entitlement-shim' if entshim else ''}): "
                     "run app, pull container, scan unencrypted stores\n")
             res = dynamic.inspect_storage(get_db(), row, sign_env=sign_env,
-                                          monitor_seconds=monitor_seconds)
+                                          monitor_seconds=monitor_seconds, entshim=entshim)
             ctx.log(f"verdict: {res['verdict']} — {len(res['findings'])} finding(s)\n")
 
     jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True,
@@ -706,15 +791,17 @@ async def act_iap_bypass(app_id: str, request: Request, _: None = Depends(requir
     sign_env = form.get("sign_env") or "dist"
     monitor_seconds = _parse_secs(form.get("monitor_seconds"))
     swap_certs = form.get("swap_certs") == "on"
+    entshim = form.get("entshim") == "on"
 
     def job(ctx):
         from ... import device, dynamic
         with tee_pipeline_logs(ctx):
-            ctx.log(f"IAP bypass probe ({sign_env} signing): launch with pinning bypass, "
-                    "capture IAP traffic, ask Llama if tamperable\n")
+            ctx.log(f"IAP bypass probe ({sign_env} signing{', entitlement-shim' if entshim else ''}): "
+                    "launch with pinning bypass, capture IAP traffic, ask Llama if tamperable\n")
             driver = device.default_driver()
             res = dynamic.detect_iap_bypass(get_db(), row, driver, sign_env=sign_env,
-                                            monitor_seconds=monitor_seconds, swap_certs=swap_certs)
+                                            monitor_seconds=monitor_seconds, swap_certs=swap_certs,
+                                            entshim=entshim, stop_check=lambda: ctx.cancelled)
             ctx.log(f"verdict: {res['verdict']} ({res.get('n_iap_flows', 0)} IAP flows)"
                     f"{' - ' + res['method'] if res.get('method') else ''}\n")
 
@@ -748,32 +835,43 @@ def act_attest(app_id: str, request: Request, _: None = Depends(require_auth)):
 
 @router.post("/app/{app_id}/attest-detect")
 def act_attest_detect(app_id: str, request: Request, manual: str = Form(""),
-                      seconds: int = Form(0), _: None = Depends(require_auth)):
+                      seconds: int = Form(0), login: str = Form(""),
+                      entshim: str = Form(""),
+                      _: None = Depends(require_auth)):
     """Observe-only App Attest / DeviceCheck usage detection (no server test).
     Injects AttestObserver, runs the app, records which attestation APIs fire.
 
     manual=on: launch the app and keep capturing for `seconds` while the human
     drives it by hand, and leave the app installed afterwards (no window-gated
-    uninstall). Otherwise Appium drives it and the app is uninstalled."""
+    uninstall). Otherwise Appium drives it and the app is uninstalled.
+
+    entshim=on also injects the EntitlementShim dylib (swallows re-sign
+    entitlement-loss crashes so they aren't mis-read as tamper detection)."""
     row = _app_or_404(app_id)
     is_manual = manual.lower() in ("1", "on", "true", "yes")
+    is_login = login.lower() in ("1", "on", "true", "yes")
+    is_entshim = entshim.lower() in ("1", "on", "true", "yes")
     secs = seconds if 30 <= seconds <= 1800 else 300
 
     def job(ctx):
         from ... import attest_detect, attestation
         with tee_pipeline_logs(ctx):
             accounts = attestation.load_accounts()
-            cb = None
+
+            # Stream each observer marker (HOOK_VERIFIED / CALL ...) to this console
+            # live, in BOTH manual and UI-automation modes.
+            def cb(line: str):
+                ctx.log(line if line.endswith("\n") else line + "\n")
+
             if is_manual:
                 ctx.log(f"MANUAL MODE: app stays installed. Interact with it now; "
                         f"the observer is streaming calls below for {secs}s.\n")
-
-                def cb(line: str):  # stream each observer marker to this console live
-                    ctx.log(line if line.endswith("\n") else line + "\n")
-
+            if is_entshim:
+                ctx.log("entitlement-shim injected (swallows re-sign entitlement-loss crashes)\n")
             conf = attest_detect.process_app(get_db(), row, accounts,
                                              manual=is_manual, manual_seconds=secs, log_cb=cb,
-                                             stop_check=lambda: ctx.cancelled)
+                                             stop_check=lambda: ctx.cancelled, login=is_login,
+                                             entshim=is_entshim)
             ctx.log(f"usage: {getattr(conf, 'value', conf)}\n")
 
     jid = get_jobs_manager().submit("attest_detect", app_id, job, device_bound=True)

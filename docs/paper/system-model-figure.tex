@@ -1,0 +1,105 @@
+% System model figure for the App Attest / DeviceCheck paper.
+% Standalone (compile directly) OR copy the tikzpicture into your paper's figure.
+% Requires: \usepackage{tikz} \usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+%
+% ASCII sketch of the intended layout:
+%
+%        +-----------------------------------------------------------+
+%        |                 TCB (trusted)                             |
+%        |   [ Apple Attestation Infrastructure ]                    |
+%        |   - App Attest root CA  - DeviceCheck 2-bit store         |
+%        +------^----------------------------^-----------------------+
+%               | hardware trust             | (3a) server-to-server
+%               | (roots Secure Enclave)     |      read/update 2 bits
+%  ....adversary-controlled.........         |
+%  : [ Client: iOS app ]            :        |
+%  :   ( Secure Enclave )           :        |
+%  :   generateKey / attestKey      :        |
+%  :   generateAssertion(cdHash)    :   (1) attestation object        +----------------+
+%  :   generateToken          ======:=======================>  [ Developer Backend ]  |
+%  :   [C1 modified client]         :   (2) request + assertion        | ENFORCEMENT    |
+%  :   [C4 local state reset]       :   (3) device token               | DECISION       |
+%  :................................:          ^                        | (F1-F8 here)   |
+%            [C2 MITM on channel] --+----------+                        +-------+--------+
+%            [C3 scale / automation]                                            |
+%                                                               (4) serve iff enforced
+%                                                                               v
+%                                                                   [ Protected resource:
+%                                                                     revenue / API / data /
+%                                                                     compute (A1-A4) ]
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=3pt, align=center, inner sep=5pt, minimum height=9mm},
+  party/.style={box, fill=blue!5, draw=blue!40},
+  apple/.style={box, fill=gray!10, draw=gray!55},
+  gate/.style={box, fill=red!8, draw=red!55, thick},
+  res/.style={box, fill=green!8, draw=green!45},
+  adv/.style={draw=red!65, text=red!70!black, rounded corners=2pt, inner sep=2pt, font=\scriptsize\bfseries},
+  flow/.style={-{Stealth[length=2mm]}, thick},
+  trust/.style={-{Stealth[length=2mm]}, dashed, gray!70},
+  >={Stealth[length=2mm]},
+]
+
+% --- Apple infrastructure (top, trusted) ---
+\node[apple, minimum width=72mm] (apple) {\textbf{Apple attestation infrastructure}\\[1pt]
+  App Attest root CA \quad$\cdot$\quad DeviceCheck two-bit store};
+
+% --- Client (left) ---
+\node[party, below left=16mm and 6mm of apple, minimum width=46mm] (client)
+  {\textbf{Client: iOS app}\\[2pt]
+   \emph{Secure Enclave}\\
+   \texttt{generateKey} / \texttt{attestKey}\\
+   \texttt{generateAssertion(cdHash)}\\
+   \texttt{generateToken}};
+
+% --- Backend with enforcement gate (center-right) ---
+\node[party, below right=16mm and 6mm of apple, minimum width=50mm] (backend)
+  {\textbf{Developer backend}};
+\node[gate, below=2pt of backend.center, anchor=north, minimum width=44mm] (gate)
+  {\textbf{Enforcement decision}\\ verify attestation / assertion / token\\ \textit{(failures F1--F8 occur here)}};
+
+% --- Protected resource (right) ---
+\node[res, below=20mm of backend, minimum width=50mm] (res)
+  {\textbf{Protected resource}\\ gated revenue, API integrity, data,\\ backend compute \ (A1--A4)};
+
+% --- Flows ---
+\draw[trust] (apple.south -| client.north) -- (client.north)
+  node[midway, left, font=\scriptsize, text=gray] {hardware trust};
+\draw[flow] (client.east) -- node[above, font=\scriptsize] {(1) attestation obj}
+  node[below, font=\scriptsize] {(2) req + assertion} ($(backend.west)+(0,2mm)$);
+\draw[flow] ($(client.east)+(0,-6mm)$) -- node[below=5pt, font=\scriptsize] {(3) device token} ($(backend.west)+(0,-6mm)$);
+\draw[flow] (backend.north -| gate.north) -- node[right, font=\scriptsize] {(3a) server-to-server\\read/update bits} (apple.south -| backend.north);
+\draw[flow] (gate.south) -- node[right, font=\scriptsize] {(4) serve iff enforced} (res.north);
+
+% --- Adversary annotations ---
+\node[adv, below=1mm of client.south] (c1) {C1 modified client \ $\cdot$ \ C4 local reset};
+\node[adv] (c2) at ($(client.east)!0.5!(backend.west)+(0,-13mm)$) {C2 MITM on channel};
+\node[adv, right=1mm of c2] (c3) {C3 scale / automation};
+
+% --- Trust boundary (background) ---
+\begin{scope}[on background layer]
+  \node[draw=gray!50, dashed, rounded corners, fill=gray!4,
+        fit=(apple), inner sep=6pt, label={[font=\scriptsize\itshape, text=gray]above right:trusted (TCB)}] {};
+  \node[draw=red!35, dotted, rounded corners, fill=red!3,
+        fit=(client)(c1), inner sep=7pt,
+        label={[font=\scriptsize\itshape, text=red!60!black]below:adversary-controlled}] {};
+\end{scope}
+
+\end{tikzpicture}
+
+\caption{%
+  \textbf{System model.} An iOS client uses the Secure Enclave to produce App Attest
+  evidence (enrollment attestation~(1), per-request assertions bound to a request
+  hash~(2)) and DeviceCheck tokens~(3); the developer backend verifies this evidence
+  and serves the protected resource only if verification succeeds~(4), querying
+  Apple server-to-server for DeviceCheck state~(3a). Apple's infrastructure and the
+  Secure Enclave form the trusted computing base; the client's software and the
+  network are adversary-controlled (C1--C4). Security collapses to a single
+  server-side \emph{enforcement decision}: when it is incomplete or absent
+  (failure classes F1--F8), the primitives provide no protection even though the
+  client appears to adopt them.%
+  \label{fig:system-model}}
+\end{figure*}

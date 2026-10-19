@@ -24,10 +24,30 @@
       box.appendChild(d);
       box.scrollTop = box.scrollHeight;
     }
+    // One live stream per page: close any previous EventSource (another job's
+    // console, or this widget re-rendered) before opening a new one, and close
+    // it when the tab content is about to be swapped out.
+    function closePrev(){ try { if(window.__havvaES){ window.__havvaES.close(); window.__havvaES = null; } } catch(e){} }
+    closePrev();
     var es = new EventSource('/jobs/{{ job['id'] }}/stream');
+    window.__havvaES = es;
+    if(!window.__havvaESHook){
+      window.__havvaESHook = true;
+      document.body.addEventListener('htmx:beforeSwap', function(ev){
+        var t = ev.detail && ev.detail.target;
+        if(t && t.id === 'tab-content') closePrev();
+      });
+    }
     es.onmessage = function(e){ add(e.data); };
     es.addEventListener('done', function(){ box.classList.add('done'); es.close();
-      var sb = document.getElementById('stop-{{ job['id'] }}'); if(sb) sb.remove(); });
+      if(window.__havvaES === es) window.__havvaES = null;
+      var sb = document.getElementById('stop-{{ job['id'] }}'); if(sb) sb.remove();
+      {% if reload %}
+      // Refresh the whole tab so the results above (banner, tiles, tables) reflect
+      // what the finished job just saved, not the stale pre-run state.
+      setTimeout(function(){ try { htmx.ajax('GET', {{ reload|tojson }}, '#tab-content'); } catch(e){} }, 700);
+      {% endif %}
+    });
     es.onerror = function(){ /* server closes on completion; ignore */ };
   })();</script>
 </div>

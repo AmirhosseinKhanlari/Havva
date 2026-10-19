@@ -27,19 +27,49 @@ log = get_logger("static", CONFIG.paths.log_dir)
 
 # ---- Pattern lists (matched case-insensitively over symbols + strings) ------
 
-PIN_LIBRARIES: dict[str, list[str]] = {
+# Library PRESENCE markers (informational: recorded as matched["tls_libs"]).
+# Presence of Alamofire/AFNetworking is NOT pinning: both ship pinning support
+# that most apps never configure. pins_flag needs CONFIGURATION evidence (below).
+TLS_LIBRARIES: dict[str, list[str]] = {
     "TrustKit": ["TSKPinningValidator", "TrustKit", "kTSKPublicKeyHashes"],
-    "AFNetworking": ["AFSecurityPolicy", "AFSSLPinningMode"],
-    "Alamofire": ["ServerTrustManager", "ServerTrustPolicy",
-                  "PinnedCertificatesTrustEvaluator", "PublicKeysTrustEvaluator"],
+    "AFNetworking": ["AFSecurityPolicy", "AFSSLPinningMode", "AFHTTPSessionManager",
+                     "AFNetworking"],
+    "Alamofire": ["Alamofire", "ServerTrustManager", "ServerTrustPolicy"],
+}
+
+# Pinning CONFIGURATION evidence, i.e. the app wires pinned material into the
+# library. Matched against the MAIN binary only (a framework's own binary always
+# contains its evaluator classes, used or not).
+PIN_CONFIG_ALAMOFIRE = [
+    "PinnedCertificatesTrustEvaluator", "PublicKeysTrustEvaluator",   # AF5
+    "ServerTrustPolicy.pinCertificates", "ServerTrustPolicy.pinPublicKeys",  # AF4 source form
+    "ServerTrustPolicyO15pinCertificates", "ServerTrustPolicyO13pinPublicKeys",  # AF4 mangled
+]
+PIN_CONFIG_AFNETWORKING = ["AFSSLPinningModeCertificate", "AFSSLPinningModePublicKey"]
+# Weaker AFNetworking evidence: a security policy is installed AND the bundle
+# ships certificate/key files to pin against.
+PIN_CONFIG_AFNETWORKING_SETTER = ["setSecurityPolicy", "policyWithPinningMode",
+                                  "setPinnedCertificates", "certificatesInBundle"]
+
+# Pinning-specific plugins/SDKs: shipped only to pin, so presence counts.
+PIN_PLUGINS: dict[str, list[str]] = {
     "Cordova": ["CustomURLConnectionDelegate", "isFingerprintTrusted",
                 "SSLCertificateChecker"],
     "ReactNativeSSLPinning": ["react-native-ssl-pinning", "RNSslPinning"],
     "Approov": ["ApproovService", "_Approov", "approov"],
     "DataDome": ["DataDomeSDK"],
-    "generic-pinned-material": ["pinnedCertificates", "pinnedPublicKeys",
-                                "certificatePinning", "publicKeyPinning"],
+    # Braintree pins its own gateway with certs compiled into the SDK.
+    "Braintree": ["BTAPIPinnedCertificates"],
 }
+# Hand-rolled pinned material in the main binary; only counted when no general
+# TLS library (which carries these property names itself) explains them.
+PIN_GENERIC_MATERIAL = ["pinnedCertificates", "pinnedPublicKeys",
+                        "certificatePinning", "publicKeyPinning"]
+
+# Backwards-compatible alias (older callers/tests imported this name).
+PIN_LIBRARIES = {**TLS_LIBRARIES, **PIN_PLUGINS, "generic-pinned-material": PIN_GENERIC_MATERIAL}
+
+CERT_FILE_EXTS = (".cer", ".der", ".crt", ".pem", ".p12", ".pfx", ".cert", ".pub", ".key")
 
 PIN_NATIVE = [
     "SecTrustEvaluateWithError", "SecTrustEvaluate", "SecTrustCopyPublicKey",
@@ -82,19 +112,31 @@ ENT_NETEXT = "com.apple.developer.networking.networkextension"
 @dataclass
 class ExtractedApp:
     """Everything the classifier reasons over, extracted from one IPA."""
-    symbols: str = ""            # nm output
-    strings: str = ""            # strings output
+    symbols: str = ""            # nm output (main binary + all frameworks/dylibs)
+    strings: str = ""            # strings output (same scope)
     linked_libs: list[str] = field(default_factory=list)  # otool -L
     frameworks: list[str] = field(default_factory=list)   # Frameworks/* names
     info_plist: dict = field(default_factory=dict)
     entitlements: dict = field(default_factory=dict)
     arch: str = ""
+    main_symbols: str = ""       # nm output of the MAIN executable only
+    main_strings: str = ""       # strings output of the MAIN executable only
+    cert_files: list[str] = field(default_factory=list)   # bundled .cer/.der/.pem/... (outside Frameworks/)
 
     @property
     def haystack(self) -> str:
         return "\n".join([self.symbols, self.strings,
                           "\n".join(self.linked_libs),
                           "\n".join(self.frameworks)])
+
+    @property
+    def main_haystack(self) -> str:
+        """Evidence from the main executable only. Falls back to the full
+        haystack when the corpus was built without the main/framework split
+        (hand-built ExtractedApp in tests)."""
+        if self.main_symbols or self.main_strings:
+            return "\n".join([self.main_symbols, self.main_strings])
+        return self.haystack
 
 
 def _find_all(haystack: str, patterns: list[str]) -> list[str]:
@@ -118,14 +160,64 @@ def classify(app: ExtractedApp) -> DefenseProfile:
             matched[f"tls:{stack.value}"] = hits
             break
 
-    # --- Pinning: library (L3) > native (L4) > delegate (L2) > ATS (L1) ---
-    pin_lib = ""
-    for lib, markers in PIN_LIBRARIES.items():
+    # --- TLS libraries PRESENT (informational, never pinning by itself) ---
+    main_hay = app.main_haystack
+    tls_libs: list[str] = []
+    for lib, markers in TLS_LIBRARIES.items():
         hits = _find_all(hay, markers)
         if hits:
-            pin_lib = lib
-            matched[f"pinlib:{lib}"] = hits
-            break
+            tls_libs.append(lib)
+            matched[f"tlslib:{lib}"] = hits
+    if tls_libs:
+        matched["tls_libs"] = tls_libs
+
+    # --- Pinning: library (L3) > native (L4) > delegate (L2) > ATS (L1) ---
+    # L3 needs pinning CONFIGURATION, not library presence (audit #9).
+    pin_lib = ""
+    layer_detail = ""
+    if "TrustKit" in tls_libs:
+        # TrustKit is config-driven: it is only linked to pin, so presence counts,
+        # but it is recorded separately so it can be split out in aggregates.
+        pin_lib = "TrustKit"
+        layer_detail = "l3_library_trustkit"
+        matched["pinlib:TrustKit"] = matched["tlslib:TrustKit"]
+    if not pin_lib and "Alamofire" in tls_libs:
+        cfg = _find_all(main_hay, PIN_CONFIG_ALAMOFIRE)
+        # Dynamically linked (Alamofire.framework shipped): an evaluator name in
+        # the MAIN binary is a reference the app itself makes -> configured.
+        # Statically linked: the library's evaluator classes land in the main
+        # binary whether used or not (Swift metadata survives dead-stripping),
+        # so additionally require pinned material in the bundle (the default
+        # evaluators load Bundle.main .cer/.der/.crt/.pem files).
+        dynamic = (any("alamofire" in f.lower() for f in app.frameworks)
+                   or any("Alamofire.framework" in l for l in app.linked_libs))
+        if cfg and (dynamic or app.cert_files):
+            pin_lib = "Alamofire"
+            matched["pinlib:Alamofire"] = cfg + (
+                [] if dynamic else [f"cert:{c}" for c in app.cert_files[:4]])
+        elif cfg:
+            matched["pinlib_candidate:Alamofire"] = cfg + ["static-link, no bundled certs"]
+    if not pin_lib and "AFNetworking" in tls_libs:
+        cfg = _find_all(main_hay, PIN_CONFIG_AFNETWORKING)
+        setter = _find_all(main_hay, PIN_CONFIG_AFNETWORKING_SETTER)
+        if cfg or (setter and app.cert_files):
+            pin_lib = "AFNetworking"
+            matched["pinlib:AFNetworking"] = cfg + setter + (
+                [f"cert:{c}" for c in app.cert_files[:4]] if setter else [])
+    if not pin_lib:
+        for lib, markers in PIN_PLUGINS.items():
+            hits = _find_all(hay, markers)
+            if hits:
+                pin_lib = lib
+                matched[f"pinlib:{lib}"] = hits
+                break
+    if not pin_lib and not ({"Alamofire", "AFNetworking"} & set(tls_libs)):
+        hits = _find_all(main_hay, PIN_GENERIC_MATERIAL)
+        if hits:
+            pin_lib = "generic-pinned-material"
+            matched["pinlib:generic-pinned-material"] = hits
+    if pin_lib:
+        matched["pin_layer_detail"] = [layer_detail or f"l3_library_{pin_lib.lower()}"]
 
     native_hits = _find_all(hay, PIN_NATIVE)
     boring_hits = _find_all(hay, PIN_BORINGSSL)
@@ -168,7 +260,13 @@ def classify(app: ExtractedApp) -> DefenseProfile:
             prof.appattest_level = "adopted"       # entitlement present (dev or unspecified env)
         else:
             prof.appattest_level = "referenced"    # API symbols only, no entitlement
+        # Combined key kept for compatibility; the split keys let consumers tell
+        # "provisioned" (entitlement) from "referenced" (symbols) apart.
         matched["appattest"] = aa + ([f"{ENT_APPATTEST}={ent_val}"] if ent_val else [])
+        if aa:
+            matched["appattest_symbols"] = aa
+        if ent_val:
+            matched["appattest_entitlement"] = [f"{ENT_APPATTEST}={ent_val}"]
     dc = _find_all(hay, DEVICECHECK_MARKERS)
     if dc:
         prof.devicecheck_flag = True
@@ -198,6 +296,11 @@ def classify(app: ExtractedApp) -> DefenseProfile:
 
 
 # ---- I/O extraction ---------------------------------------------------------
+
+# Generous per-binary cap on nm / strings output (characters). Large app
+# binaries produce ~10-50 MB of strings; this keeps a pathological 500 MB
+# framework from stalling the sweep while scanning every binary.
+_PER_BINARY_CAP = 96 * 1024 * 1024
 
 def _app_dir(unzipped: Path) -> Path | None:
     payload = unzipped / "Payload"
@@ -235,22 +338,39 @@ def extract_corpus(ipa_path: str | Path) -> ExtractedApp | None:
 
     exe_name = info.get("CFBundleExecutable", "")
     main_bin = app_dir / exe_name if exe_name else None
-    binaries = [main_bin] if main_bin and main_bin.exists() else []
+    has_main = bool(main_bin and main_bin.exists())
     fw_dir = app_dir / "Frameworks"
-    frameworks = [p.name for p in fw_dir.glob("*")] if fw_dir.exists() else []
-    # include framework binaries in the symbol/string sweep (Flutter etc. hide here)
+    frameworks = sorted(p.name for p in fw_dir.glob("*")) if fw_dir.exists() else []
+    # ALL framework binaries + dylibs, in a deterministic order (Flutter etc.
+    # hide here; an unsorted, capped list made coverage nondeterministic).
+    fw_bins: list[Path] = []
     if fw_dir.exists():
-        for fw in fw_dir.glob("*.framework"):
+        for fw in sorted(fw_dir.glob("*.framework")):
             b = fw / fw.stem
             if b.exists():
-                binaries.append(b)
-        binaries.extend(fw_dir.glob("*.dylib"))
+                fw_bins.append(b)
+        fw_bins.extend(sorted(fw_dir.glob("*.dylib")))
 
+    def _sweep(b: Path) -> tuple[str, str, list[str]]:
+        sym = run_cmd(["nm", "-m", str(b)], timeout=120).stdout[:_PER_BINARY_CAP]
+        st = run_cmd(["strings", "-a", str(b)], timeout=120).stdout[:_PER_BINARY_CAP]
+        ll = run_cmd(["otool", "-L", str(b)], timeout=30).stdout.splitlines()
+        return sym, st, ll
+
+    main_symbols = main_strings = ""
     symbols, strings_out, libs = [], [], []
-    for b in binaries[:12]:  # cap work
-        symbols.append(run_cmd(["nm", "-m", str(b)], timeout=60).stdout)
-        strings_out.append(run_cmd(["strings", "-a", str(b)], timeout=60).stdout)
-        libs.extend(run_cmd(["otool", "-L", str(b)], timeout=30).stdout.splitlines())
+    if has_main:
+        main_symbols, main_strings, ll = _sweep(main_bin)
+        symbols.append(main_symbols); strings_out.append(main_strings); libs.extend(ll)
+    for b in fw_bins:
+        sym, st, ll = _sweep(b)
+        symbols.append(sym); strings_out.append(st); libs.extend(ll)
+
+    # Certificate / key files shipped outside Frameworks/ (pin-by-cert material).
+    cert_files = sorted(
+        str(p.relative_to(app_dir)) for p in app_dir.rglob("*")
+        if p.is_file() and p.name.lower().endswith(CERT_FILE_EXTS)
+        and "Frameworks" not in p.relative_to(app_dir).parts)[:60]
 
     entitlements = {}
     if main_bin and main_bin.exists():
@@ -269,6 +389,7 @@ def extract_corpus(ipa_path: str | Path) -> ExtractedApp | None:
         symbols="\n".join(symbols), strings="\n".join(strings_out),
         linked_libs=libs, frameworks=frameworks, info_plist=info,
         entitlements=entitlements, arch=arch,
+        main_symbols=main_symbols, main_strings=main_strings, cert_files=cert_files,
     )
     run_cmd(["rm", "-rf", str(work)])  # clean staging
     return corpus

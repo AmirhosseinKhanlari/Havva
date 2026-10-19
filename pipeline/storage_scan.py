@@ -15,17 +15,37 @@ from __future__ import annotations
 
 import plistlib
 import re
+import sqlite3
 from pathlib import Path
 
-from .analysis import scan_secrets
+from .analysis import _looks_like_email, scan_secrets
 
 _MAX_FILE = 8 * 1024 * 1024  # don't scan huge media/db blobs whole
 
+# Sensitive key / column names. Each keyword must start at a word boundary or a
+# camelCase transition (so "clientSecret" / "user_password" match) and must end
+# at a word boundary or a camelCase transition (so "pin" does not match "pinned"
+# or "spinning", "ssn" does not match "ssnumber", and "secret" does not match
+# "secretary"). A trailing plural "s" is allowed ("passwords", "credentials").
 _SENSITIVE_KEY = re.compile(
-    r"(?i)(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|refresh[_-]?token|"
+    r"(?:(?<![A-Za-z0-9])|(?<=[a-z])(?=[A-Z]))"
+    r"(?i:password|passwd|pwd|secret(?!ary)|api[_-]?key|access[_-]?key|refresh[_-]?token|"
     r"auth[_-]?token|id[_-]?token|session[_-]?id|credential|private[_-]?key|"
-    r"card[_-]?number|creditcard|cvv|ssn|pin\b)")
+    r"card[_-]?number|creditcard|cvv2?|ssn|pin)"
+    r"(?i:s)?(?![a-z0-9])")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _find_email(text: str) -> str | None:
+    """First address in `text` that survives the shared noise filter (drops
+    resource names such as logo@2x.png / icon@3x and format-string artifacts)."""
+    for m in _EMAIL.finditer(text or ""):
+        e = m.group()
+        if "@2x" in e or "@3x" in e or "@4x" in e:
+            continue
+        if _looks_like_email(e):
+            return e
+    return None
 
 
 def _store_of(rel: str) -> str:
@@ -102,7 +122,7 @@ def scan_container(root: str | Path) -> tuple[list[dict], dict]:
                     findings.append({"store": store, "file": rel,
                                      "type": f"sensitive key: {key}", "severity": "medium",
                                      "detail": val[:60]})
-                elif val and _EMAIL.search(val):
+                elif val and _find_email(val):
                     findings.append({"store": store, "file": rel,
                                      "type": "email in stored value", "severity": "medium",
                                      "detail": val[:60]})
@@ -116,7 +136,12 @@ def scan_container(root: str | Path) -> tuple[list[dict], dict]:
         # 3) SQLite / Core Data: open the DB and read tables + rows (like
         #    Objection's `sqlite connect` / `execute query`).
         if store == "SQLite / Core Data" and len(raw) > 64:
-            findings += _scan_sqlite(p, store, rel)
+            try:
+                findings += _scan_sqlite(p, store, rel)
+            except (sqlite3.DatabaseError, OSError) as e:   # never abort the walk
+                findings.append({"store": store, "file": rel, "severity": "info",
+                                 "type": "sqlite file not readable (encrypted?)",
+                                 "detail": str(e)[:80]})
         # Other unencrypted stores: just note presence.
         elif store in ("Realm", "Cookies", "Keyboard cache") and len(raw) > 64:
             findings.append({"store": store, "file": rel,
@@ -127,26 +152,32 @@ def scan_container(root: str | Path) -> tuple[list[dict], dict]:
 
 def _scan_sqlite(path, store: str, rel: str) -> list[dict]:
     """Open a pulled SQLite DB read-only, enumerate tables, and scan rows for
-    secrets / sensitive columns. If it won't open it may be encrypted (good)."""
-    import sqlite3
+    secrets / sensitive columns. A file that will not open or read (SQLCipher /
+    encrypted, truncated, not actually SQLite) yields one info finding and the
+    container walk CONTINUES with the next file."""
     out: list[dict] = []
+    unreadable = {"store": store, "file": rel, "severity": "info",
+                  "type": "sqlite file not readable (encrypted?)", "detail": ""}
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True, timeout=3)
-    except Exception:  # noqa: BLE001
-        return [{"store": store, "file": rel, "severity": "info",
-                 "type": "SQLite present but could not open (possibly encrypted)", "detail": ""}]
+    except (sqlite3.DatabaseError, OSError) as e:
+        return [{**unreadable, "detail": str(e)[:80]}]
     try:
         cur = con.cursor()
-        tables = [r[0] for r in cur.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite_%'").fetchall()]
+        try:
+            tables = [r[0] for r in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'").fetchall()]
+        except (sqlite3.DatabaseError, OSError) as e:
+            # "file is not a database" surfaces on the first query, not on connect.
+            return [{**unreadable, "detail": str(e)[:80]}]
         for t in tables:
             try:
                 n = cur.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
                 cur.execute(f'SELECT * FROM "{t}" LIMIT 25')
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall()
-            except Exception:  # noqa: BLE001
+            except (sqlite3.DatabaseError, OSError):
                 continue
             sens_cols = [c for c in cols if c and _SENSITIVE_KEY.search(c)]
             if sens_cols:
@@ -161,10 +192,10 @@ def _scan_sqlite(path, store: str, rel: str) -> list[dict]:
                                 "type": f"SQLite '{t}': {s['type']}",
                                 "detail": (s.get("value") or "")[:60]})
                     hits += 1
-                m = _EMAIL.search(text)
-                if m:
+                em = _find_email(text)
+                if em:
                     out.append({"store": store, "file": rel, "severity": "medium",
-                                "type": f"SQLite '{t}': email in row", "detail": m.group()[:60]})
+                                "type": f"SQLite '{t}': email in row", "detail": em[:60]})
                     hits += 1
                 if hits >= 6:
                     break
@@ -183,6 +214,8 @@ def verdict_of(findings: list[dict]) -> tuple[str, str]:
         return "exposed", "Secrets/credentials found in an unencrypted store."
     if "medium" in sev:
         return "exposed", "Sensitive values found in an unencrypted store (NSUserDefaults / tokens)."
-    if "info" in sev:
+    if sev & {"low", "info"}:
+        # Low/info findings are still findings (unencrypted stores hold data,
+        # unreadable DBs, IP literals...): surface them, never report "clean".
         return "review", "Unencrypted stores hold data but no obvious secret was matched. Review manually."
     return "clean", "No data found in the inspected unencrypted stores."

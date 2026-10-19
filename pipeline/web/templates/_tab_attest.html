@@ -11,7 +11,17 @@
       <input type="number" name="seconds" value="300" min="30" max="1800" class="numin">
       <span class="muted" style="font-size:12px">s</span>
     </span>
-    <button class="pill small primary" hx-post="/app/{{ app_id }}/attest-detect" hx-include="[name='manual'],[name='seconds']" hx-target="#att-action" hx-swap="innerHTML" hx-confirm="Run the App Attest usage detector?">Run usage detection</button>
+    <label class="switch" title="Log in via accounts.json before capturing, to reach attestation-gated screens">
+      <input type="checkbox" name="login" id="att-login">
+      <span class="track"><span class="thumb"></span></span>
+      <span class="slabel">UI login</span>
+    </label>
+    <label class="switch" title="Inject EntitlementShim: swallows re-sign entitlement-loss crashes (e.g. TV-provider SSO) so they aren't mis-read as tamper detection">
+      <input type="checkbox" name="entshim" id="att-entshim">
+      <span class="track"><span class="thumb"></span></span>
+      <span class="slabel">Entitlement shim</span>
+    </label>
+    <button class="pill small primary" hx-post="/app/{{ app_id }}/attest-detect" hx-include="[name='manual'],[name='seconds'],[name='login'],[name='entshim']" hx-target="#att-action" hx-swap="innerHTML" hx-confirm="Run the App Attest usage detector?">Run usage detection</button>
   </div>
 </div>
 <script>(function(){
@@ -22,9 +32,10 @@
 })();</script>
 
 {% if attest_usage %}
-<div class="banner" style="margin-bottom:14px">
+<div class="banner {% if attest_usage['crashed'] %}hit{% endif %}" style="margin-bottom:14px">
   <div class="row1">
-    <span class="bdot" style="background:{% if attest_usage['used'] %}var(--accent){% else %}var(--ink3){% endif %};box-shadow:0 0 14px {% if attest_usage['used'] %}var(--accent){% else %}transparent{% endif %}"></span>
+    {% set bc = 'var(--bad)' if attest_usage['crashed'] else ('var(--accent)' if attest_usage['used'] else 'var(--ink3)') %}
+    <span class="bdot" style="background:{{ bc }};box-shadow:0 0 14px {{ bc if attest_usage['crashed'] or attest_usage['used'] else 'transparent' }}"></span>
     <span class="btitle">{{ attest_usage['summary'] }}</span>
   </div>
   <div class="ink2" style="margin-top:8px;padding-left:22px;font-size:13.5px">{{ attest_usage['detail'] }}</div>
@@ -101,4 +112,4 @@
 {% else %}
 <p class="muted" style="font-size:14px">Not tested yet. Requires the XR + results/accounts.json (test accounts).</p>
 {% endif %}
-<div id="att-action"></div>
+<div id="att-action">{% if active_job %}{% with job=active_job, phase=active_phase, reload=active_reload %}{% include "_job_watch.html" %}{% endwith %}{% endif %}</div>

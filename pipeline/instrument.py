@@ -20,7 +20,9 @@ dylib in Payload/<App>.app/Frameworks/. Idea carried from paper 1's inject.py
 from __future__ import annotations
 
 import json
+import os
 import plistlib
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -33,12 +35,39 @@ from .util import get_logger, run_cmd
 log = get_logger("instrument", CONFIG.paths.log_dir)
 
 
+_CONFIG_LABEL_RE = re.compile(r"[A-Za-z0-9_:.,-]+")
+_DYLIB_NAME_RE = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+def _check_name(kind: str, name: str) -> str:
+    """A dylib file name must be a single path component: no '/', no '..'
+    (either would let a spec escape Frameworks/ or dylib_dir)."""
+    if (not isinstance(name, str) or not name or "/" in name or "\\" in name
+            or ".." in name or name in (".",) or not _DYLIB_NAME_RE.fullmatch(name)):
+        raise ValueError(f"invalid dylib {kind}: {name!r}")
+    return name
+
+
+def validate_config_label(config: str) -> str:
+    """`config` names the work dir (work/inst_<app>_<config>) that build()
+    rmtree's, so it must never contain path separators or '..'."""
+    if not isinstance(config, str) or not _CONFIG_LABEL_RE.fullmatch(config) or ".." in config:
+        raise ValueError(f"invalid config label: {config!r}")
+    return config
+
+
 @dataclass
 class DylibSpec:
     source: str          # file name in dylib_dir
     install_as: str      # name inside the app's Frameworks/
     load: str            # "weak" or "strong"
     config_listen: bool = False  # write a Frida-gadget .config next to it
+
+    def __post_init__(self) -> None:
+        _check_name("source", self.source)
+        _check_name("install_as", self.install_as)
+        if self.load not in ("weak", "strong"):
+            raise ValueError(f"invalid load kind: {self.load!r}")
 
 
 def _d() -> "CONFIG.dylibs.__class__":
@@ -104,10 +133,26 @@ def dylib_catalog() -> list[dict]:
          "source": "EvasionKit.dylib", "alias": "libSystemBridge.dylib", "load": "weak", "default": False},
         {"id": "attest", "label": "AttestObserver", "desc": "Logs App Attest / DeviceCheck API calls",
          "source": "AttestObserver.dylib", "alias": "libServiceBridge.dylib", "load": "weak", "default": False},
+        {"id": "entshim", "label": "EntitlementShim",
+         "desc": "Swallows re-sign entitlement-loss crashes (e.g. TV-provider SSO) so they aren't misread as tamper detection",
+         "source": "EntitlementShim.dylib", "alias": "libAccountBridge.dylib", "load": "weak", "default": False},
     ]
     for it in items:
         it["present"] = _dylib_path(it["source"]).exists()
     return items
+
+
+ENTSHIM_ID = "entshim"
+ENTSHIM_SOURCE = "EntitlementShim.dylib"
+
+
+def append_entshim(specs: list[DylibSpec], aliased: bool = True) -> list[DylibSpec]:
+    """Append the EntitlementShim dylib to a spec list (idempotent). Lets any
+    dynamic/attest test opt in to swallowing re-sign entitlement-loss crashes so
+    they aren't mis-read as tamper detection."""
+    if any(s.source == ENTSHIM_SOURCE for s in specs):
+        return list(specs)
+    return list(specs) + custom_specs([ENTSHIM_ID], aliased=aliased)
 
 
 def custom_specs(selected_ids: list[str], aliased: bool = True) -> list[DylibSpec]:
@@ -133,9 +178,12 @@ def ensure_pem(rs=None) -> bool:
     if not rs.p12.exists():
         log.error("no signing cert: %s missing", rs.p12)
         return False
+    # The p12 password goes through the environment (`-passin env:`), never on
+    # argv where any local process could read it from `ps`.
+    env = {**os.environ, "HAVVA_P12_PW": rs.p12_password or ""}
     for extra in (["-legacy"], []):
         run_cmd(["openssl", "pkcs12", *extra, "-in", str(rs.p12), "-out", str(rs.pem),
-                 "-nodes", "-passin", f"pass:{rs.p12_password}"], timeout=60)
+                 "-nodes", "-passin", "env:HAVVA_P12_PW"], timeout=60, env=env)
         if rs.pem.exists():
             return True
     log.error("failed to export PEM from p12")
@@ -223,12 +271,20 @@ def _swap_bundled_certs(app_dir: Path, ca_pem: "str | Path") -> int:
 
 def build(app_id: str, decrypted_ipa: str | Path, config: str,
           specs: "list[DylibSpec] | None" = None,
-          sign_env: str | None = None, swap_certs: bool = False) -> tuple[bool, str, str]:
+          sign_env: str | None = None, swap_certs: bool = False,
+          entshim: bool = False) -> tuple[bool, str, str]:
     """Build a signed IPA for `config`. If `specs` is given, inject exactly those
     dylibs (a custom selection) instead of the named config's fixed set.
     `sign_env` ("dev"/"dist") picks the cert+profile; defaults to configured.
     `swap_certs` overwrites bundled certificate files with the MITM CA.
-    Returns (ok, signed_ipa_path, error)."""
+    `entshim` also injects the EntitlementShim dylib (swallows re-sign
+    entitlement-loss crashes). Returns (ok, signed_ipa_path, error)."""
+    validate_config_label(config)          # raises ValueError on traversal
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(app_id)) or ".." in str(app_id):
+        raise ValueError(f"invalid app id: {app_id!r}")
+    for spec in (specs or []):
+        _check_name("source", spec.source)
+        _check_name("install_as", spec.install_as)
     rs = CONFIG.signing.resolve(sign_env)
     if not ensure_pem(rs):
         return False, "", "no signing PEM"
@@ -266,6 +322,8 @@ def build(app_id: str, decrypted_ipa: str | Path, config: str,
             specs = config_specs(config)
         except ValueError as e:
             return False, "", str(e)
+    if entshim:
+        specs = append_entshim(specs)
 
     log.info("unpacked %s (%s)", main_binary.name, info.get("CFBundleIdentifier", "?"))
     for spec in specs:

@@ -2,6 +2,82 @@
   {% if not acquired %}
   {% include "_acquire_first.html" %}
   {% else %}
+
+  {# ---- Static IAP analysis (no run needed; from the deep static scan) ---- #}
+  {% set SEVC = {'high':'var(--bad)','medium':'var(--warn)','low':'var(--ok)','info':'var(--ink2)'} %}
+  <div class="glass sm" style="padding:16px 18px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:18px">🧾</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:15px;font-weight:800">Static IAP analysis</div>
+        <div class="muted" style="font-size:11.5px">StoreKit generation, where purchases are validated, and whether the known-weak (verifyReceipt / on-device receipt) path is present. From the binary, no run needed.</div>
+      </div>
+      {% if iap_static and iap_static.risk %}
+        {% set rl = iap_static.risk.level %}
+        <span class="pill small" style="color:{{ SEVC.get(rl,'var(--ink2)') }};border:1px solid {{ SEVC.get(rl,'var(--ink2)') }};padding:3px 10px;text-transform:uppercase;font-size:10px;font-weight:800">{{ rl }} risk</span>
+      {% endif %}
+    </div>
+
+    {% if not iap_static %}
+      <div class="muted" style="font-size:12.5px;margin-top:12px">No static analysis yet. Run the <b>Static</b> tab's deep analysis first, then this populates automatically.</div>
+    {% else %}
+      {% set off = iap_static.offering %}
+      {% if off in ('none','latent') %}
+      <div class="muted" style="font-size:12.5px;margin-top:10px">
+        {% if off=='latent' %}No active in-app purchase flow detected. StoreKit symbols are present but look latent (SDK / dead code){% if iap_static.storekit_noniap_uses %} or are used only for {{ iap_static.storekit_noniap_uses|join(', ') }}{% endif %}.
+        {% else %}No in-app purchases detected in this app.{% endif %}
+      </div>
+      {% endif %}
+      <div class="kvgrid" style="margin-top:14px">
+        <div><div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.5px">IAP offering</div>
+          <div style="font-size:14px;font-weight:700">
+            {{ {'store-listed':'Yes (App Store)','code-detected':'Yes (in binary)','latent':'Latent only','none':'None','none-detected':'None detected'}.get(off, off) }}
+          </div></div>
+        <div><div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.5px">StoreKit</div>
+          <div style="font-size:14px;font-weight:700">
+            {% set v = iap_static.storekit_version %}
+            {% if v=='1' %}StoreKit 1 <span class="muted" style="font-weight:400">(legacy receipt)</span>
+            {% elif v=='2' %}StoreKit 2 <span class="muted" style="font-weight:400">(JWS)</span>
+            {% elif v=='both' %}StoreKit 1 + 2
+            {% elif v=='sdk-only' %}SDK-managed
+            {% else %}none{% endif %}
+            {% if iap_static.storekit_noniap_uses %}<span class="muted" style="font-weight:400;font-size:11px;display:block">non-IAP: {{ iap_static.storekit_noniap_uses|join(', ') }}</span>{% endif %}
+          </div></div>
+        <div><div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.5px">Validation path</div>
+          <div style="font-size:14px;font-weight:700">
+            {% set loc = iap_static.validation.location %}
+            {{ {'server-apple-api':'App Store Server API','storekit2-jws':'StoreKit 2 JWS','sdk':'Managed SDK','client-verifyreceipt':'verifyReceipt (weak)','on-device-receipt':'On-device receipt (weak)','unknown':'Undetermined','n/a':'—'}.get(loc, loc) }}
+          </div></div>
+        <div><div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.5px">IAP SDK</div>
+          <div style="font-size:14px;font-weight:700">{{ iap_static.iap_sdks|join(', ') if iap_static.iap_sdks else '—' }}</div></div>
+      </div>
+
+      {% if iap_static.validation.verifyreceipt_endpoints %}
+      <div class="glass" style="margin-top:12px;padding:10px 12px;border:1px solid var(--bad)">
+        <div style="font-size:12.5px;font-weight:700;color:var(--bad)">Vulnerable Apple endpoint present</div>
+        <div class="muted" style="font-size:11.5px;margin-top:3px;font-family:ui-monospace,monospace">{{ iap_static.validation.verifyreceipt_endpoints|join('  ·  ') }}</div>
+        <div class="muted" style="font-size:11px;margin-top:4px">Deprecated verifyReceipt validation is MITM-bypassable: a proxy can forge the "valid" reply to unlock premium.</div>
+      </div>
+      {% endif %}
+
+      {% if iap_static.findings %}
+      <table class="dtable" style="margin-top:14px">
+        <thead><tr><th>Signal</th><th style="width:90px">Severity</th><th>Matches</th></tr></thead>
+        <tbody>
+        {% for f in iap_static.findings %}
+          <tr>
+            <td style="font-size:12.5px">{{ f.category }}</td>
+            <td><span class="sev" style="color:{{ SEVC.get(f.severity,'var(--ink2)') }}">{{ f.severity }}</span></td>
+            <td class="muted" style="font-size:11px;font-family:ui-monospace,monospace">{{ (f.matches or [])|join(', ') }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+      <div class="muted" style="font-size:11px;margin-top:10px">{{ iap_static.risk.reason }}</div>
+    {% endif %}
+  </div>
+
   <div class="glass sm" style="padding:16px 18px;border:1.5px solid var(--accent)">
     <div style="display:flex;align-items:center;gap:10px">
       <span style="font-size:18px">💳</span>
@@ -31,9 +107,15 @@
           <span class="muted" style="font-size:12px">seconds to drive the app and capture traffic</span>
         </label>
       </div>
-      <label style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
-        <input type="checkbox" name="swap_certs" style="width:16px;height:16px;accent-color:var(--accent)">
+      <label class="switch" style="margin-bottom:12px">
+        <input type="checkbox" name="swap_certs">
+        <span class="track"><span class="thumb"></span></span>
         <span style="font-size:12.5px">Also swap bundled certificates with the MITM CA (for cert-pinned apps)</span>
+      </label>
+      <label class="switch" style="margin-bottom:12px">
+        <input type="checkbox" name="entshim">
+        <span class="track"><span class="thumb"></span></span>
+        <span style="font-size:12.5px">Inject EntitlementShim <span class="muted">(swallows re-sign entitlement-loss crashes so they aren't mis-read as tamper detection)</span></span>
       </label>
       <button class="pill primary">▶ Detect IAP bypass</button>
     </form>

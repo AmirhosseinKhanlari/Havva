@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ...config import CONFIG, PROJECT_ROOT
 from ..app import templates
@@ -23,6 +24,44 @@ EDITABLE = [
     ("WEB_MAX_WORKERS", "concurrent non-device jobs"),
 ]
 SECRETS = ("WEB_AUTH_TOKEN", "IPATOOL_PASSWORD", "SIGN_P12_PASSWORD", "APPFIGURES_COOKIE")
+
+# Keys that must parse as integers (with an allowed range) before they are
+# written; a bad value would otherwise crash config loading on the next start.
+INT_FIELDS = {
+    "WEB_MAX_WORKERS": (1, 32),
+    "WEB_PORT": (1, 65535),
+    "DECRYPT_SSH_PORT": (1, 65535),
+    "PROXYMAN_PORT": (1, 65535),
+    "MONITOR_SECONDS": (1, 3600),
+    "CRAWL_COUNT_PER_CATEGORY": (1, 100000),
+    "ACQUIRE_MAX_ATTEMPTS": (1, 1000),
+}
+_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def validate_updates(updates: dict) -> dict:
+    """Reject anything that could inject extra lines into .env (newlines / CR)
+    and coerce integer fields. Returns the cleaned {key: value}. Raises
+    ValueError with a user-facing message."""
+    clean = {}
+    for key, val in updates.items():
+        if not _KEY_RE.match(key):
+            raise ValueError(f"{key}: not an editable key")
+        val = str(val)
+        if "\n" in val or "\r" in val or "\0" in val:
+            raise ValueError(f"{key}: value must be a single line")
+        val = val.strip()
+        if key in INT_FIELDS and val != "":
+            lo, hi = INT_FIELDS[key]
+            try:
+                n = int(val)
+            except ValueError:
+                raise ValueError(f"{key}: must be an integer") from None
+            if not lo <= n <= hi:
+                raise ValueError(f"{key}: must be between {lo} and {hi}")
+            val = str(n)
+        clean[key] = val
+    return clean
 
 
 def _mask(v: str) -> str:
@@ -72,7 +111,10 @@ def settings_page(request: Request, _: None = Depends(require_auth)):
 @router.post("/settings/save")
 async def settings_save(request: Request, _: None = Depends(require_auth)):
     form = await request.form()
-    updates = {k: str(form.get(k, "")).strip() for k, _ in EDITABLE if k in form}
+    try:
+        updates = validate_updates({k: str(form.get(k, "")) for k, _ in EDITABLE if k in form})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     _write_env(updates)
     return templates.TemplateResponse(request, "_settings_saved.html", {
         "request": request, "updates": updates})

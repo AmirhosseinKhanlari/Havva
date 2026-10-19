@@ -6,8 +6,15 @@ set of app-relevant hosts that were invisible at Stage 0 (own CA, no bypass) but
 became visible after a bypass config.
 
 Host sets passed in here are already filtered: Apple/excluded infrastructure and
-the Mac's own traffic are removed upstream, so a non-empty set means the app
-itself talked to a non-Apple host.
+the Mac's own traffic are removed upstream, so a non-empty set means SOMETHING
+on the device talked to a non-Apple host.
+
+Attribution caveat: hosts are collected per device IP, not per process. iOS
+gives the proxy no per-app attribution, so background traffic from other
+installed apps (push-driven refreshes, widgets, ad SDKs) can land in any
+config's host set and, if it only shows up during a bypass run, be mistaken for
+a host the bypass revealed. Keep the test device bare and compare against the
+Stage-0 baseline taken under the same conditions.
 """
 
 from __future__ import annotations

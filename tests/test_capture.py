@@ -44,7 +44,19 @@ def test_har_to_flows_and_app_hosts():
     flows = har_to_flows(har, device_ip="192.168.1.116")
     hosts = app_hosts(flows, excluded=["apple.com"])
     assert hosts == {"api.example.com", "analytics.example.com"}
-    assert reached_any_network(flows)
+    assert reached_any_network(flows, excluded=["apple.com"])
+
+
+def test_reached_any_network_ignores_excluded_background_traffic():
+    # Apple/iCloud background traffic is always present on the device; it must
+    # not make a tamper-exited app look like it "ran and reached the network".
+    har = _har([_entry("https://gsp.apple.com/z"), _entry("https://p12-keyvalueservice.icloud.com/x")])
+    flows = har_to_flows(har, device_ip="192.168.1.116")
+    assert flows  # the flows exist ...
+    assert not reached_any_network(flows, excluded=["apple.com", "icloud.com"])  # ... but don't count
+    assert reached_any_network(flows + har_to_flows(_har([_entry("https://api.example.com/")]),
+                                                    device_ip="192.168.1.116"),
+                               excluded=["apple.com", "icloud.com"])
 
 
 def test_device_ip_filter():
@@ -74,10 +86,16 @@ def test_empty_har():
 from pipeline.capture import _classify_trace, session_host_outcomes  # noqa: E402
 
 
-def _trace(host, kinds, details=None):
+def _trace(host, kinds, details=None, state=None):
     details = details or {}
     events = [{"kind": k, "detail": details.get(k, "")} for k in kinds]
-    return {"resolvedHost": host, "events": events}
+    t = {"resolvedHost": host, "events": events}
+    if state is not None:
+        t["state"] = state
+    return t
+
+
+_TLS_FAIL = {"error": "sslError(handshake failure: certificate verify failed)"}
 
 
 def test_classify_decrypted():
@@ -86,14 +104,52 @@ def test_classify_decrypted():
 
 
 def test_classify_pinned_when_tls_aborts_before_complete():
-    # Connected, TLS started against our cert, then torn down -> pinning.
-    t = _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "error", "closed"])
+    # Connected, TLS started, then FAILED with a TLS-flavoured reason -> pinned (lead).
+    t = _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "error", "closed"],
+               details=_TLS_FAIL, state="failed")
     assert _classify_trace(t) == ("api.bank.com", "pinned")
+
+
+def test_classify_failed_without_tls_reason_is_not_pinned():
+    # The ubiquitous upstream 'uncleanShutdown': no TLS reason -> never pinned.
+    t = _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "tlsComplete", "error"],
+               details={"error": "uncleanShutdown"}, state="failed")
+    assert _classify_trace(t) == ("api.bank.com", "unknown")
+    # A handshake that only shows 'handshake' in tlsMessage details (every TLS
+    # trace does) but no TLS failure reason is not pinned either.
+    t = _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "error"],
+               details={"tlsMessage": "handshake", "error": "stream ended at an unexpected time"},
+               state="failed")
+    assert _classify_trace(t)[1] != "pinned"
+
+
+def test_classify_failed_is_never_decrypted():
+    t = _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "tlsComplete", "error"],
+               details={"error": "uncleanShutdown"}, state="failed")
+    assert _classify_trace(t)[1] != "decrypted"
+
+
+def test_classify_close_notify_alert_is_benign():
+    t = _trace("cdn.x.io", ["resolved", "connected", "tlsMessage", "tlsComplete", "error"],
+               details={"error": "sslError(SSL routines: SSLV3_ALERT_CLOSE_NOTIFY)"}, state="failed")
+    assert _classify_trace(t)[1] != "pinned"
+
+
+def test_classify_dns_failure_is_not_pinned_even_if_tls_mentioned():
+    t = _trace("api.bank.com", ["resolved", "error"],
+               details={"error": "dns error before tls"}, state="failed")
+    assert _classify_trace(t) == ("api.bank.com", "connect_failed")
 
 
 def test_classify_unresolved_is_not_pinned():
     t = _trace("dead.example", ["error"],
                details={"error": "Could not resolve host: dead.example"})
+    assert _classify_trace(t) == ("dead.example", "unresolved")
+
+
+def test_classify_unresolved_when_no_resolved_event_at_all():
+    # No 'resolved' DNS event -> unresolved, regardless of detail text.
+    t = _trace("dead.example", ["trying", "error"], details={"error": "timeout"}, state="failed")
     assert _classify_trace(t) == ("dead.example", "unresolved")
 
 
@@ -108,10 +164,14 @@ def test_session_host_outcomes_prefers_decrypted_and_drops_excluded(tmp_path):
     import json
     import zipfile
     traces = [
-        _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "error"]),   # pinned
-        _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "tlsComplete"]),  # decrypted -> wins
-        _trace("cdn.x.io", ["resolved", "connected", "tlsMessage", "error"]),        # pinned
-        _trace("gsp.apple.com", ["resolved", "connected", "tlsMessage", "error"]),   # excluded -> dropped
+        _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "error"],
+               details=_TLS_FAIL, state="failed"),   # pinned
+        _trace("api.bank.com", ["resolved", "connected", "tlsMessage", "tlsComplete"],
+               state="connected"),  # decrypted -> wins
+        _trace("cdn.x.io", ["resolved", "connected", "tlsMessage", "error"],
+               details=_TLS_FAIL, state="failed"),        # pinned
+        _trace("gsp.apple.com", ["resolved", "connected", "tlsMessage", "error"],
+               details=_TLS_FAIL, state="failed"),   # excluded -> dropped
     ]
     p = tmp_path / "s.proxymansession"
     with zipfile.ZipFile(p, "w") as z:
@@ -119,3 +179,47 @@ def test_session_host_outcomes_prefers_decrypted_and_drops_excluded(tmp_path):
             z.writestr(f"ConnectionTraces/trace_{i}", json.dumps(t))
     out = session_host_outcomes(p, excluded=["apple.com"])
     assert out == {"api.bank.com": "decrypted", "cdn.x.io": "pinned"}
+
+
+
+# ---- Export must never reuse a stale file -----------------------------------
+
+from pipeline import capture as _capture  # noqa: E402
+
+
+def test_export_har_removes_stale_file_when_cli_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(_capture, "run_cmd", lambda *a, **k: None)   # CLI writes nothing
+    monkeypatch.setattr(_capture.time, "sleep", lambda s: None)
+    p = tmp_path / "x.har"
+    p.write_text('{"log":{"entries":[{"request":{"url":"https://stale.example/"}}]}}')
+    assert _capture.export_har(p, retries=2) is False
+    assert not p.exists()
+
+
+def test_export_har_returns_true_when_cli_writes(tmp_path, monkeypatch):
+    def fake_cli(cmd, timeout=30):
+        pathlib.Path(cmd[-1]).write_text('{"log":{"entries":[]}}')
+    import pathlib
+    monkeypatch.setattr(_capture, "run_cmd", fake_cli)
+    p = tmp_path / "x.har"
+    assert _capture.export_har(p, retries=1) is True
+
+
+def test_export_session_ignores_stale_suffixed_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(_capture, "run_cmd", lambda *a, **k: None)
+    monkeypatch.setattr(_capture.time, "sleep", lambda s: None)
+    p = tmp_path / "x.proxymansession"
+    stale = tmp_path / "x.proxymansessionv2"
+    stale.write_bytes(b"old")
+    p.write_bytes(b"old")
+    assert _capture.export_session(p, retries=1) is None
+    assert not stale.exists() and not p.exists()
+
+
+def test_export_session_accepts_freshly_written_suffixed_file(tmp_path, monkeypatch):
+    def fake_cli(cmd, timeout=30):
+        import pathlib
+        pathlib.Path(cmd[-1] + "v2").write_bytes(b"PK new")
+    monkeypatch.setattr(_capture, "run_cmd", fake_cli)
+    p = tmp_path / "x.proxymansession"
+    assert _capture.export_session(p, retries=1) == tmp_path / "x.proxymansessionv2"

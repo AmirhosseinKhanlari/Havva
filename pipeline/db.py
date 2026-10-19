@@ -85,6 +85,16 @@ CREATE TABLE IF NOT EXISTS acquisition (
     acquired_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS acquisition_versions (
+    app_id TEXT REFERENCES apps(app_id),
+    version_id TEXT NOT NULL,            -- externalVersionId / short version requested
+    status INTEGER DEFAULT 0,            -- WorkState
+    ipa_path TEXT,
+    error TEXT,
+    acquired_at TEXT,
+    PRIMARY KEY (app_id, version_id)
+);
+
 CREATE TABLE IF NOT EXISTS static_profile (
     app_id TEXT PRIMARY KEY REFERENCES apps(app_id),
     pins_flag INTEGER DEFAULT 0,
@@ -249,10 +259,14 @@ class Database:
                           ("binary_type", "TEXT"), ("security_score", "TEXT"),
                           ("trackers", "TEXT"), ("dependencies", "TEXT"),
                           ("privacy_manifest", "TEXT"), ("bundled_certs", "TEXT"),
-                          ("app_extensions", "TEXT"), ("ats_gap", "TEXT")):
+                          ("app_extensions", "TEXT"), ("ats_gap", "TEXT"),
+                          ("iap", "TEXT")):
             self.add_column_if_missing("analysis", col, decl)
         self.add_column_if_missing("static_profile", "appattest_level", "TEXT DEFAULT 'none'")
         self.add_column_if_missing("dynamic_runs", "log", "TEXT DEFAULT ''")
+        # acquisition work-queue bookkeeping: retry budget + last transient error
+        self.add_column_if_missing("acquisition", "attempts", "INTEGER DEFAULT 0")
+        self.add_column_if_missing("acquisition", "last_error", "TEXT")
 
     def add_column_if_missing(self, table: str, column: str, decl: str) -> None:
         """The paper-1 `ensure_rc_columns` idiom: additive migration."""
@@ -385,6 +399,53 @@ class Database:
                 (app_id, int(state), ipa_path, arch, error, _now()),
             )
 
+    def record_acquisition_attempt(self, app_id: str, error: str = "") -> int:
+        """Count one failed (UNTESTED, i.e. retryable) acquire attempt for the
+        work queue. Creates the acquisition row if needed (status stays
+        UNTESTED). Returns the new attempt count."""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO acquisition (app_id, decrypt_status, attempts, last_error, acquired_at)
+                   VALUES (?, 0, 1, ?, ?)
+                   ON CONFLICT(app_id) DO UPDATE SET
+                     attempts=COALESCE(acquisition.attempts,0)+1, last_error=excluded.last_error""",
+                (app_id, error, _now()))
+            row = conn.execute("SELECT attempts FROM acquisition WHERE app_id=?",
+                               (app_id,)).fetchone()
+            return int(row["attempts"] or 0) if row else 0
+
+    def save_acquisition_version(self, app_id: str, version_id: str, state: WorkState,
+                                 ipa_path: str = "", error: str = "") -> None:
+        """Record the result of acquiring one SPECIFIC older build. Kept apart
+        from the canonical `acquisition` row so a version-specific failure (or
+        success) never clobbers the app's current-build acquisition state."""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO acquisition_versions
+                   (app_id, version_id, status, ipa_path, error, acquired_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(app_id, version_id) DO UPDATE SET
+                     status=excluded.status, ipa_path=excluded.ipa_path,
+                     error=excluded.error, acquired_at=excluded.acquired_at""",
+                (app_id, str(version_id), int(state), ipa_path, error, _now()))
+
+    def get_acquisition_versions(self, app_id: str) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM acquisition_versions WHERE app_id=? ORDER BY acquired_at DESC, version_id",
+                (app_id,)).fetchall()
+
+    def app_id_for_bundle(self, bundle_id: str) -> str | None:
+        """Existing corpus key for a bundle id (so a bundle-id acquire reuses the
+        crawled row instead of inserting a duplicate keyed by bundle id)."""
+        if not bundle_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT app_id FROM apps WHERE bundle_id=? ORDER BY (app_id=?) DESC, app_id LIMIT 1",
+                (bundle_id, bundle_id)).fetchone()
+            return row["app_id"] if row else None
+
     def delete_acquisition(self, app_id: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM acquisition WHERE app_id=?", (app_id,))
@@ -457,7 +518,8 @@ class Database:
                      fields=excluded.fields, urls=excluded.urls, method=excluded.method,
                      analysis=excluded.analysis, error=excluded.error,
                      n_iap_flows=excluded.n_iap_flows, probed_at=excluded.probed_at""",
-                (app_id, verdict, int(bool(res.get("tamperable"))),
+                (app_id, verdict,
+                 None if res.get("tamperable") is None else int(bool(res.get("tamperable"))),
                  json.dumps(res.get("fields") or []), json.dumps(res.get("urls") or []),
                  res.get("method") or "", res.get("analysis") or "", res.get("error") or "",
                  n_iap_flows, _now()),
@@ -569,12 +631,28 @@ class Database:
 
     # ---- Resumable work queues -----------------------------------------
 
-    def apps_needing(self, stage: Stage) -> list[sqlite3.Row]:
-        """Return apps that still need `stage` run, honoring the tri-state queue."""
+    @staticmethod
+    def acquire_max_attempts() -> int:
+        """Retry budget for transient acquire failures (env ACQUIRE_MAX_ATTEMPTS)."""
+        import os
+        try:
+            return max(1, int(os.environ.get("ACQUIRE_MAX_ATTEMPTS", "5")))
+        except ValueError:
+            return 5
+
+    def apps_needing(self, stage: Stage, max_attempts: int | None = None) -> list[sqlite3.Row]:
+        """Return apps that still need `stage` run, honoring the tri-state queue.
+        For ACQUIRED, rows whose transient-failure `attempts` reached
+        `max_attempts` (default env ACQUIRE_MAX_ATTEMPTS=5) are left out so a
+        permanently flaky app stops consuming the device."""
+        params: tuple = ()
+        if stage == Stage.ACQUIRED:
+            params = (max_attempts if max_attempts is not None else self.acquire_max_attempts(),)
         q = {
             Stage.ACQUIRED: """SELECT a.* FROM apps a
                 LEFT JOIN acquisition ac ON ac.app_id=a.app_id
-                WHERE ac.app_id IS NULL OR ac.decrypt_status=0""",
+                WHERE (ac.app_id IS NULL OR ac.decrypt_status=0)
+                  AND COALESCE(ac.attempts,0) < ?""",
             Stage.STATIC_DONE: """SELECT a.* FROM apps a
                 JOIN acquisition ac ON ac.app_id=a.app_id AND ac.decrypt_status=1
                 LEFT JOIN static_profile s ON s.app_id=a.app_id
@@ -589,7 +667,7 @@ class Database:
                 WHERE at.app_id IS NULL OR at.work_state=0""",
         }[stage]
         with self.connect() as conn:
-            return conn.execute(q).fetchall()
+            return conn.execute(q, params).fetchall()
 
     # ---- Web reads ------------------------------------------------------
 
@@ -775,8 +853,10 @@ class Database:
         cols = ("info_plist", "entitlements", "ats", "frameworks", "sdks",
                 "secrets", "file_tree", "crypto_hints", "binary_protections",
                 "insecure_apis", "binary_type", "security_score", "trackers",
-                "dependencies", "privacy_manifest", "bundled_certs", "app_extensions")
-        vals = [json.dumps(data.get(c)) for c in cols]
+                "dependencies", "privacy_manifest", "bundled_certs", "app_extensions",
+                "iap")
+        # SQL NULL for absent values, never the JSON literal string 'null'.
+        vals = [None if data.get(c) is None else json.dumps(data.get(c)) for c in cols]
         with self.connect() as conn:
             conn.execute(
                 f"INSERT INTO analysis (app_id, {', '.join(cols)}, analyzed_at) "

@@ -41,7 +41,9 @@ def public_ip() -> str:
 
 
 def disconnect() -> None:
-    run_cmd(["sudo", "pkill", "-f", "openvpn"], timeout=15)
+    # -x: exact process name only. -f would also kill any process whose argv
+    # merely contains "openvpn" (e.g. a script living under an openvpn/ dir).
+    run_cmd(["sudo", "pkill", "-x", "openvpn"], timeout=15)
     time.sleep(2)
 
 

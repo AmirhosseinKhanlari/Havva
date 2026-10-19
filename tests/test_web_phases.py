@@ -162,3 +162,82 @@ def test_settings_save_writes_env(tmp_path, monkeypatch):
     assert r.status_code == 200
     assert "ACQUIRE_MODE=ipatool" in (tmp_path / ".env").read_text()
     assert os.environ["ACQUIRE_MODE"] == "ipatool"
+
+
+# ---- audit 2026-10-18 ----
+
+def test_static_tab_renders_with_multiple_vulnerable_deps():
+    """Regression: Jinja `sort(attribute='cves')` 500'd with >= 2 deps carrying
+    CVE lists (lists of dicts are not orderable). The router now precomputes
+    n_cves and the template sorts on that."""
+    c, appmod = _client(tempfile.mkdtemp())
+    db = appmod.get_db()
+    db.save_analysis("999", {"info_plist": {"summary": {"CFBundleIdentifier": "com.test.app"}},
+                             "dependencies": [
+        {"name": "libA", "version": "1.0", "cves": [
+            {"id": "CVE-2024-0001", "severity": "high", "summary": "a", "fixed": "1.1"},
+            {"id": "CVE-2024-0002", "severity": "medium", "summary": "b", "fixed": ""}]},
+        {"name": "libB", "version": "2.0", "cves": [
+            {"id": "CVE-2023-0009", "severity": "high", "summary": "c", "fixed": "2.1"}]},
+        {"name": "libC", "version": "3.0", "cves": []},
+        {"name": "libD", "version": "4.0"},
+    ]})
+    r = c.get("/app/999/tab/static")
+    assert r.status_code == 200
+    assert r.text.index("libA") < r.text.index("libB") < r.text.index("libC")
+    from pipeline.web.routers.app_detail import _decode_analysis
+    deps = _decode_analysis(db.get_analysis("999"))["dependencies"]
+    assert [d["n_cves"] for d in deps] == [2, 1, 0, 0]
+
+
+def test_dynamic_custom_rejects_unknown_dylib_ids():
+    c, appmod = _client(tempfile.mkdtemp())
+    r = c.post("/app/999/dynamic/custom", data={"dylibs": ["ssks", "../../etc"]})
+    assert r.status_code == 400 and "unknown dylib" in r.text
+    r = c.post("/app/999/dynamic/custom", data={"dylibs": ["nope"]})
+    assert r.status_code == 400
+    r = c.post("/app/999/dynamic/custom", data={})
+    assert r.status_code == 400
+    assert appmod.get_db().list_jobs() == []      # nothing was submitted
+
+
+def test_corpus_pagination_querystring_is_urlencoded():
+    c, _ = _client(tempfile.mkdtemp())
+    # page=2 so the Prev link (which carries the filter querystring) is rendered
+    r = c.get("/corpus", params={"q": "a&b=c d", "category": "Finance", "page": 2})
+    assert r.status_code == 200
+    assert "q=a%26b%3Dc+d" in r.text and "category=Finance" in r.text
+    assert "q=a&b=c d" not in r.text
+
+
+def test_remove_and_download_resolve_relative_ipa_dir(monkeypatch):
+    """The listing resolves IPA_DIR against the project root; remove/download
+    must use the same resolution (previously they used the raw, possibly
+    relative, CONFIG path and so depended on the server's cwd)."""
+    import pipeline.web.routers.app_detail as ad
+    tmp = tempfile.mkdtemp()
+    c, appmod = _client(tmp)
+    ipa_dir = Path(tmp) / "ipas"
+    ipa_dir.mkdir()
+    cur = ipa_dir / "999.decrypted.ipa"
+    _seed_ipa(cur)
+    old = ipa_dir / "999-v842.decrypted.ipa"
+    _seed_ipa(old)
+    monkeypatch.setattr(ad, "_ipa_dir", lambda: str(ipa_dir))
+    db = appmod.get_db()
+    db.save_acquisition("999", WorkState.POSITIVE, ipa_path=str(cur))
+    db.save_acquisition_version("999", "842", WorkState.POSITIVE, ipa_path=str(old))
+    assert c.get("/app/999/download", params={"file": old.name}).status_code == 200
+    assert c.get("/app/999/download", params={"file": "../999.decrypted.ipa"}).status_code == 200
+    assert c.get("/app/999/download", params={"file": "998.decrypted.ipa"}).status_code == 400
+    assert c.get("/app/999/download", params={"file": "999-v842.ipa"}).status_code == 400
+    # remove the old version: canonical row untouched, version row cleared
+    r = c.post("/app/999/remove", data={"file": old.name})
+    assert r.status_code == 200 and not old.exists() and cur.exists()
+    assert db.get_acquisition("999")["ipa_path"] == str(cur)
+    assert db.get_acquisition_versions("999")[0]["ipa_path"] == ""
+    # remove the current build: acquisition row goes away
+    r = c.post("/app/999/remove", data={"file": cur.name})
+    assert r.status_code == 200 and not cur.exists()
+    assert db.get_acquisition("999") is None
+    assert c.get("/app/999/download").status_code == 404

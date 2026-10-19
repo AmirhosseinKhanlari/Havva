@@ -12,6 +12,7 @@ project root, which overrides the defaults below.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,18 +20,58 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _parse_dotenv_line(raw: str) -> tuple[str, str] | None:
+    """Parse one .env line into (key, value) or None if it sets nothing.
+
+    Supports `export KEY=VALUE`, strips an inline comment only when it is
+    preceded by whitespace (`VALUE # note`; a '#' inside a value such as a
+    password stays), strips only MATCHING surrounding quotes (a quoted value is
+    taken verbatim, comments included), and returns None for an empty value so
+    the code default applies instead of an empty string."""
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    if line.startswith("export ") or line.startswith("export\t"):
+        line = line[len("export"):].strip()
+    key, _, value = line.partition("=")
+    key = key.strip()
+    if not _ENV_KEY_RE.match(key):
+        return None
+    value = value.strip()
+    quoted = False
+    if value[:1] in ("'", '"'):
+        q = value[0]
+        end = value.find(q, 1)
+        rest = value[end + 1:].strip() if end != -1 else None
+        # A matching closing quote, followed by nothing or a comment: take the
+        # quoted text verbatim. Otherwise (unterminated / mismatched) treat the
+        # raw text as an ordinary value.
+        if end != -1 and (rest == "" or rest.startswith("#")):
+            value, quoted = value[1:end], True
+    if not quoted:
+        m = re.search(r"\s#", value)
+        if m:
+            value = value[:m.start()].rstrip()
+        if value.startswith("#"):
+            value = ""
+    if value == "":
+        return None
+    return key, value
+
+
 def _load_dotenv(path: Path) -> None:
-    """Minimal .env loader (no dependency). KEY=VALUE lines, # comments."""
+    """Minimal .env loader (no dependency). KEY=VALUE lines, # comments. Real
+    environment variables win over the file (setdefault)."""
     if not path.exists():
         return
     for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        kv = _parse_dotenv_line(raw)
+        if kv is None:
             continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        os.environ.setdefault(kv[0], kv[1])
 
 
 _load_dotenv(PROJECT_ROOT / ".env")

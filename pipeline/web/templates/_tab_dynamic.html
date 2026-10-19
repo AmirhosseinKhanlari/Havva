@@ -12,9 +12,17 @@
 </div>
 {% endmacro %}
 {% macro cert_swap_toggle() %}
-<label style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
-  <input type="checkbox" name="swap_certs" style="width:16px;height:16px;accent-color:var(--accent)">
+<label class="switch" style="margin-bottom:12px">
+  <input type="checkbox" name="swap_certs">
+  <span class="track"><span class="thumb"></span></span>
   <span style="font-size:12.5px">Swap bundled certificates with the MITM CA <span class="muted">(defeats cert-file pinning; MASTG-TECH-0064)</span></span>
+</label>
+{% endmacro %}
+{% macro entshim_toggle() %}
+<label class="switch" style="margin-bottom:12px">
+  <input type="checkbox" name="entshim">
+  <span class="track"><span class="thumb"></span></span>
+  <span style="font-size:12.5px">Inject EntitlementShim <span class="muted">(swallows re-sign entitlement-loss crashes, e.g. TV-provider SSO, so they aren't mis-read as tamper detection)</span></span>
 </label>
 {% endmacro %}
 {% macro monitor_input() %}
@@ -46,11 +54,24 @@
           hx-confirm="Run two MITM passes on the XR (clean, then SSL Kill Switch) to find pinned endpoints?" style="margin-top:14px">
       {{ sign_env_select() }}
       {{ monitor_input() }}
-      <label style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
-        <input type="checkbox" name="aliased" checked style="width:16px;height:16px;accent-color:var(--accent)">
+      <label class="switch" style="margin-bottom:12px">
+        <input type="checkbox" name="aliased" checked>
+        <span class="track"><span class="thumb"></span></span>
         <span style="font-size:12.5px">Rename injected dylibs to evade detection</span>
       </label>
       {{ cert_swap_toggle() }}
+      {{ entshim_toggle() }}
+      <label class="switch" style="margin-bottom:12px">
+        <input type="checkbox" name="login" id="pin-login">
+        <span class="track"><span class="thumb"></span></span>
+        <span style="font-size:12.5px">Enable UI login automation <span class="muted">(logs in via accounts.json before capture, to reach gated endpoints)</span></span>
+      </label>
+      <script>(function(){
+        var t=document.getElementById('pin-login'); if(!t||t.dataset.i)return; t.dataset.i='1';
+        var f=t.closest('form'); var s=f&&f.querySelector('[name=monitor_seconds]'); if(!s)return;
+        var orig=s.value;
+        t.addEventListener('change',function(){ s.value = t.checked ? '60' : orig; });
+      })();</script>
       <button class="pill primary">▶ Probe for pinning</button>
     </form>
   </div>
@@ -137,6 +158,7 @@
           hx-confirm="Run two quick launches on the XR (plain re-sign, then SideloadFix) to detect anti-resign?" style="margin-top:12px">
       {{ sign_env_select() }}
       {{ monitor_input() }}
+      {{ entshim_toggle() }}
       <button class="pill primary">▶ Probe for sideload detection</button>
     </form>
   </div>
@@ -177,6 +199,7 @@
           hx-confirm="Run the app on the XR, pull its data container and scan it for insecure storage?" style="margin-top:12px">
       {{ sign_env_select() }}
       {{ monitor_input() }}
+      {{ entshim_toggle() }}
       <button class="pill primary">▶ Inspect data storage</button>
     </form>
   </div>
@@ -263,8 +286,9 @@
       <div class="muted" style="font-size:11.5px;margin-bottom:8px">Inject dylibs (select)</div>
       <div class="hlist" style="gap:8px">
         {% for d in dylibs %}
-        <label style="display:flex;align-items:center;gap:11px;{% if not d['present'] %}opacity:.5{% endif %}">
-          <input type="checkbox" name="dylibs" value="{{ d['id'] }}" {% if d['default'] and d['present'] %}checked{% endif %} {% if not d['present'] %}disabled{% endif %} style="width:18px;height:18px;accent-color:var(--accent)">
+        <label class="switch" style="gap:11px;{% if not d['present'] %}opacity:.5{% endif %}">
+          <input type="checkbox" name="dylibs" value="{{ d['id'] }}" {% if d['default'] and d['present'] %}checked{% endif %} {% if not d['present'] %}disabled{% endif %}>
+          <span class="track"><span class="thumb"></span></span>
           <span style="flex:1;min-width:0">
             <span style="font-size:14px;font-weight:600">{{ d['label'] }}</span>
             <span class="muted" style="font-size:11.5px;display:block">{{ d['desc'] }}{% if not d['present'] %} · not built{% endif %}</span>
@@ -272,13 +296,15 @@
         </label>
         {% endfor %}
       </div>
-      <label style="display:flex;align-items:center;gap:9px;margin-top:12px">
-        <input type="checkbox" name="aliased" checked style="width:16px;height:16px;accent-color:var(--accent)">
+      <label class="switch" style="margin-top:12px">
+        <input type="checkbox" name="aliased" checked>
+        <span class="track"><span class="thumb"></span></span>
         <span style="font-size:12.5px">Rename injected dylibs to evade detection</span>
       </label>
       <div style="margin-top:12px">{{ sign_env_select() }}</div>
       {{ monitor_input() }}
       {{ cert_swap_toggle() }}
+      {{ entshim_toggle() }}
       <div style="display:flex;align-items:center;gap:10px;margin-top:12px">
         <button class="pill primary">Run once with selected dylibs</button>
         <button class="pill primary" type="button" hx-post="/app/{{ app_id }}/dynamic" hx-target="#dyn-action" hx-swap="innerHTML" hx-confirm="Run the full auto bypass ladder?">Auto ladder</button>

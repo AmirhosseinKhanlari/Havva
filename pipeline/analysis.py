@@ -29,12 +29,14 @@ log = logging.getLogger("analysis")
 # Third-party SDK fingerprints: friendly name -> distinctive signatures matched
 # against framework/dylib names AND the binary's strings (catches static linking).
 # Signatures are chosen to be specific (class prefixes / unique tokens) to avoid
-# false positives.
+# false positives. Never use a bare English word ("Adjust", "Split", "Branch",
+# "Heap", "Singular", "Lottie"...): those collide with UIKit selectors and
+# ordinary strings in every binary.
 _SDK_SIGNS = {
     # Purchases / paywalls / IAP
     "RevenueCat": ["RevenueCat", "RCPurchases", "RCStoreProduct", "com.revenuecat"],
-    "Superwall": ["Superwall", "SuperwallKit"],
-    "Adapty": ["Adapty", "AdaptyUI"],
+    "Superwall": ["SuperwallKit", "com.superwall", "api.superwall.com"],
+    "Adapty": ["AdaptyUI", "AdaptyPaywall", "com.adapty", "api.adapty.io"],
     "Qonversion": ["Qonversion", "QNPurchases"],
     "Glassfy": ["Glassfy"],
     # Networking / TLS
@@ -52,25 +54,25 @@ _SDK_SIGNS = {
     "Google Utilities": ["GoogleUtilities"],
     # Attribution / analytics
     "AppsFlyer": ["AppsFlyerLib", "AppsFlyer", "AFSDKAttribution"],
-    "Adjust": ["Adjust", "ADJConfig", "ADJEvent"],
-    "Branch": ["BranchSDK", "BNCConfig", "\"Branch\""],
-    "Singular": ["Singular", "SingularConfig"],
-    "Tenjin": ["Tenjin", "TenjinSDK"],
-    "Amplitude": ["Amplitude", "AMPTracking"],
+    "Adjust": ["AdjustSdk", "ADJConfig", "ADJAdjust", "com.adjust"],
+    "Branch": ["BranchSDK", "BNCConfig", "BNCPreferenceHelper", "io.branch"],
+    "Singular": ["SingularSDK", "SingularConfig", "com.singular"],
+    "Tenjin": ["TenjinSDK", "TenjinSDK.framework"],
+    "Amplitude": ["AMPAmplitude", "AmplitudeSwift", "com.amplitude"],
     "Mixpanel": ["Mixpanel", "MPTweak"],
     "Segment": ["SEGAnalytics", "com.segment"],
     "mParticle": ["mParticle", "MParticleUser"],
     "Adobe Analytics": ["ADBMobile", "AEPCore", "ACPCore"],
     "PostHog": ["PostHog", "PHGPostHog"],
-    "Heap": ["HeapAnalytics", "\"Heap\""],
-    "Pendo": ["PendoManager", "\"Pendo\""],
+    "Heap": ["HeapAnalytics", "HeapSwiftCore", "io.heap"],
+    "Pendo": ["PendoManager", "PendoSDK", "sdk.pendo.io"],
     # Crash / monitoring
     "Sentry": ["SentrySDK", "SentryClient", "io.sentry"],
     "Bugsnag": ["Bugsnag", "BugsnagConfiguration"],
     "Datadog": ["DatadogCore", "DDLogs", "DDTrace", "dd-sdk-ios"],
     "New Relic": ["NewRelic", "NRMAAgent"],
     "Instabug": ["Instabug", "IBGLog"],
-    "Embrace": ["EmbraceIO", "EMBEmbrace"],
+    "Embrace": ["EmbraceIO", "EMBEmbrace", "io.embrace"],
     "Firebase Performance": ["FirebasePerformance", "FIRPerformance"],
     # Engagement / messaging / support
     "OneSignal": ["OneSignal", "OSNotification"],
@@ -79,11 +81,11 @@ _SDK_SIGNS = {
     "Iterable": ["IterableAPI", "IterableSDK"],
     "Airship": ["UAirship", "AirshipCore"],
     "MoEngage": ["MoEngage", "MOInApp"],
-    "Intercom": ["Intercom", "ICMIntercom"],
+    "Intercom": ["IntercomSDK", "ITMIntercom", "ICMIntercom", "com.intercom"],
     "Zendesk": ["ZendeskSDK", "ZDKChat", "SupportSDK"],
     "LaunchDarkly": ["LaunchDarkly", "LDClient"],
     "Optimizely": ["Optimizely", "OPTLYClient"],
-    "Split": ["SplitSdk", "io.split"],
+    "Split": ["SplitSdk", "io.split"],   # never bare "Split"
     # Ads / mediation
     "AppLovin MAX": ["AppLovinSDK", "ALSdk", "MAAd"],
     "ironSource": ["IronSource", "ISConfigurations"],
@@ -92,10 +94,10 @@ _SDK_SIGNS = {
     "AdColony": ["AdColony", "AdColonyAppOptions"],
     # UI / utility / storage
     "SDWebImage": ["SDWebImage", "SDImageCache"],
-    "Kingfisher": ["Kingfisher", "KFImage"],
-    "Lottie": ["Lottie", "LottieAnimationView"],
+    "Kingfisher": ["Kingfisher", "KFImageCache", "KingfisherManager"],
+    "Lottie": ["LOTAnimationView", "com.airbnb.lottie", "LottieAnimationView"],
     "RxSwift": ["RxSwift", "RxCocoa"],
-    "SnapKit": ["SnapKit", "ConstraintMaker"],
+    "SnapKit": ["SnapKit", "ConstraintMakerExtendable"],
     "Realm": ["RealmSwift", "RLMObject", "RLMRealm"],
     "Stripe": ["StripeCore", "STPPaymentConfiguration", "StripePaymentSheet"],
     # Social SDKs
@@ -106,12 +108,21 @@ _SDK_SIGNS = {
 }
 
 _CRYPTO_SYMS = ("SecItemAdd", "SecItemCopyMatching", "SecTrustEvaluate",
-                "SecTrustEvaluateWithError", "kSecAttrAccessible", "CCCrypt",
+                "SecTrustEvaluateWithError", "kSecAttrAccessibleWhenUnlocked",
+                "kSecAttrAccessibleAfterFirstUnlock", "kSecAttrAccessibleAlways",
+                "kSecAttrAccessibleWhenUnlockedThisDeviceOnly",
+                "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly",
+                "kSecAttrAccessibleAlwaysThisDeviceOnly",
+                "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly", "CCCrypt",
                 "CC_SHA256", "SecKeyCreateSignature", "DCAppAttestService",
                 "DCDevice", "LAContext", "SecRandomCopyBytes")
 
 # Insecure / interesting binary API rules (mirrors MobSF ipa_rules.py). Each entry:
-# (category, severity, [byte tokens to look for in the strings/symbols blob]).
+# (category, severity, [tokens matched as WHOLE symbols in the strings+nm blob]).
+# Tokens are matched by _sym_hits: a token must be delimited by non-identifier
+# characters on both sides (so `_gets` never matches `_getschedparam`), and a
+# token without a leading underscore also matches its C-symbol form (`CC_MD5`
+# matches nm's `_CC_MD5`).
 _API_RULES = [
     ("Insecure C functions", "high",
      [b"_strcpy", b"_strcat", b"_strncpy", b"_strncat", b"_sprintf", b"_vsprintf",
@@ -122,8 +133,8 @@ _API_RULES = [
     ("Weak crypto (DES/3DES/RC4/RC2/ECB)", "high",
      [b"kCCAlgorithmDES", b"kCCAlgorithm3DES", b"kCCAlgorithmRC4",
       b"kCCAlgorithmRC2", b"kCCOptionECBMode"]),
-    ("Insecure random", "medium", [b"_srand", b"_random\n", b"_rand\n"]),
-    ("Malloc usage", "info", [b"_malloc\n"]),
+    ("Insecure random", "medium", [b"_srand", b"_random", b"_rand"]),
+    ("Malloc usage", "info", [b"_malloc"]),
     ("NSLog logging", "info", [b"_NSLog"]),
     ("ptrace anti-debug (non-public API)", "medium", [b"_ptrace"]),
     ("UIWebView (deprecated/insecure)", "medium", [b"UIWebView"]),
@@ -134,11 +145,12 @@ _API_RULES = [
     ("NSUserDefaults (unencrypted storage)", "info",
      [b"NSUserDefaults", b"standardUserDefaults"]),
     ("Local SQLite / Core Data (unencrypted DB)", "info",
-     [b"sqlite3_open", b"sqlite3_exec", b"sqlite3_prepare", b"NSSQLiteStoreType",
+     [b"sqlite3_open", b"sqlite3_open_v2", b"sqlite3_exec", b"sqlite3_prepare",
+      b"sqlite3_prepare_v2", b"NSSQLiteStoreType",
       b"NSPersistentStoreCoordinator", b"NSManagedObjectContext"]),
     ("Realm database (verify encryptionKey)", "info", [b"RLMRealm", b"RealmSwift"]),
     ("Weak Keychain accessibility (kSecAttrAccessibleAlways)", "medium",
-     [b"kSecAttrAccessibleAlways"]),
+     [b"kSecAttrAccessibleAlways", b"kSecAttrAccessibleAlwaysThisDeviceOnly"]),
     ("Pasteboard use (system-wide data leakage)", "info",
      [b"generalPasteboard", b"UIPasteboard"]),
     ("Cookie storage (may persist session/sensitive data)", "info",
@@ -187,16 +199,28 @@ _TRACKER_DOMAINS = {
 # Secret/endpoint patterns: (label, regex, severity).
 _SECRET_PATTERNS = [
     ("AWS access key", re.compile(rb"AKIA[0-9A-Z]{16}"), "high"),
-    ("Google API key", re.compile(rb"AIza[0-9A-Za-z\-_]{35}"), "high"),
+    # Google API keys / Stripe publishable keys are public by design (client
+    # identifiers, restricted server-side): reported for inventory, never scored.
+    ("Google API key", re.compile(rb"AIza[0-9A-Za-z\-_]{35}"), "info"),
     ("Stripe live key", re.compile(rb"sk_live_[0-9A-Za-z]{16,}"), "high"),
-    ("Stripe pub key", re.compile(rb"pk_live_[0-9A-Za-z]{16,}"), "medium"),
+    ("Stripe pub key", re.compile(rb"pk_live_[0-9A-Za-z]{16,}"), "info"),
     ("Slack token", re.compile(rb"xox[baprs]-[0-9A-Za-z\-]{10,}"), "high"),
     ("JWT", re.compile(rb"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}"), "medium"),
-    ("Bearer token", re.compile(rb"[Bb]earer\s+[A-Za-z0-9\-._~+/]{20,}"), "medium"),
+    ("Bearer token", re.compile(rb"[Bb]earer[ \t]+[A-Za-z0-9\-._~+/]{20,}"), "medium"),
     ("Private key block", re.compile(rb"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----"), "high"),
     ("S3 bucket URL", re.compile(rb"[a-z0-9.\-]+\.s3[.-][a-z0-9.\-]*amazonaws\.com"), "low"),
-    ("Hardcoded IP", re.compile(rb"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"), "low"),
+    # Not adjacent to letters/digits/dots (so "v2.3.0.0" / "1.2.3.4.5" are not IPs).
+    ("Hardcoded IP", re.compile(rb"(?<![A-Za-z0-9.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![A-Za-z0-9.])"), "low"),
 ]
+
+
+def _plausible_ip(val: str) -> bool:
+    """Reject version-like dotted quads: last two octets both 0 (2.3.0.0, 0.0.0.0)."""
+    octs = val.split(".")
+    return not (len(octs) == 4 and octs[2] == "0" and octs[3] == "0")
+
+
+_SECRET_VALIDATORS = {"Hardcoded IP": _plausible_ip}
 _URL_RE = re.compile(rb"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]{6,}")
 
 
@@ -289,9 +313,44 @@ def frameworks(zf: zipfile.ZipFile, app_dir: str, bin_path: Path | None) -> dict
     return {"embedded": embedded, "linked": linked}
 
 
+_SYM_RX_CACHE: dict[tuple, re.Pattern] = {}
+
+
+def _sym_hits(evidence: bytes, tokens) -> list[str]:
+    """Tokens that occur in `evidence` (strings + nm output) as WHOLE symbols.
+
+    A hit must be delimited by non-identifier characters on both sides:
+    `(?<![A-Za-z0-9_])TOKEN(?![A-Za-z0-9_])`, so `_gets` does not match
+    `_getschedparam` and `_rand` does not match `_random`. A token that does not
+    start with an underscore also matches its C-symbol spelling with one leading
+    underscore (`CC_MD5` <-> nm's `_CC_MD5`, `UIWebView` <-> `_OBJC_CLASS_$_UIWebView`).
+    Returns the tokens as given (str), sorted."""
+    toks = tuple(t.decode() if isinstance(t, bytes) else str(t) for t in tokens)
+    toks = tuple(t.strip() for t in toks if t.strip())
+    if not toks or not evidence:
+        return []
+    rx = _SYM_RX_CACHE.get(toks)
+    if rx is None:
+        alts = "|".join(re.escape(t) for t in sorted(toks, key=len, reverse=True))
+        rx = re.compile(rb"(?<![A-Za-z0-9_])_?(?:" + alts.encode() + rb")(?![A-Za-z0-9_])")
+        _SYM_RX_CACHE[toks] = rx
+    want = set(toks)
+    found: set[str] = set()
+    for m in set(rx.findall(evidence)):
+        s = m.decode("utf-8", "replace")
+        if s in want:
+            found.add(s)
+        elif s.startswith("_") and s[1:] in want:
+            found.add(s[1:])
+        if len(found) == len(want):
+            break
+    return sorted(found)
+
+
 def fingerprint_sdks(fw: dict, strings_blob: bytes = b"") -> list[str]:
-    """Detect third-party SDKs from framework/dylib names AND the binary strings
-    (so statically-linked SDKs with no separate .framework are caught too)."""
+    """Detect third-party SDKs from framework/dylib names AND the binary evidence
+    (strings + symbols, so statically-linked SDKs with no separate .framework are
+    caught too)."""
     names = " ".join(fw.get("embedded", []) + fw.get("linked", []))
     found = set()
     for name, sigs in _SDK_SIGNS.items():
@@ -302,17 +361,20 @@ def fingerprint_sdks(fw: dict, strings_blob: bytes = b"") -> list[str]:
     return sorted(found)
 
 
-def crypto_hints(strings_blob: bytes) -> list[str]:
-    return sorted({s for s in _CRYPTO_SYMS if s.encode() in strings_blob})
+def crypto_hints(evidence: bytes) -> list[str]:
+    """Security-framework / crypto symbols referenced by the binary (whole-symbol
+    matches over strings + nm output)."""
+    return _sym_hits(evidence, _CRYPTO_SYMS)
 
 
 def scan_secrets(strings_blob: bytes) -> dict:
     findings = []
     for label, rx, sev in _SECRET_PATTERNS:
         seen = set()
+        check = _SECRET_VALIDATORS.get(label)
         for m in rx.findall(strings_blob):
             val = m.decode("utf-8", "replace")
-            if val in seen:
+            if val in seen or (check and not check(val)):
                 continue
             seen.add(val)
             findings.append({"type": label, "severity": sev,
@@ -375,20 +437,24 @@ def checksec(bin_path: Path | None) -> dict:
     return out
 
 
-def binary_type(fw: dict, strings_blob: bytes) -> str:
+def binary_type(fw: dict, evidence: bytes) -> str:
+    """Swift / Objective-C / unknown from linked libs + symbol evidence (the
+    runtime entry points live in the symbol table, so `evidence` must include nm)."""
     linked = " ".join(fw.get("linked", []) + fw.get("embedded", []))
-    if "libswiftCore" in linked or b"_swift_release" in strings_blob or b"swift_getObjectType" in strings_blob:
+    if "libswiftCore" in linked or _sym_hits(
+            evidence, ("_swift_release", "_swift_retain", "_swift_getObjectType",
+                       "_swift_allocObject")):
         return "Swift"
-    if b"_objc_msgSend" in strings_blob:
+    if _sym_hits(evidence, ("_objc_msgSend", "_objc_msgSendSuper2", "_objc_retain")):
         return "Objective-C"
     return "unknown"
 
 
-def insecure_apis(strings_blob: bytes) -> list[dict]:
+def insecure_apis(evidence: bytes) -> list[dict]:
+    """MobSF-style API rules over the strings + nm evidence (whole-symbol matches)."""
     findings = []
     for category, sev, tokens in _API_RULES:
-        hits = sorted({t.strip(b"\n").decode("utf-8", "replace")
-                       for t in tokens if t in strings_blob})
+        hits = _sym_hits(evidence, tokens)
         if hits:
             findings.append({"category": category, "severity": sev, "matches": hits})
     return findings
@@ -435,7 +501,12 @@ def detect_trackers(secrets: dict) -> list[dict]:
 
 
 def security_score(report: dict) -> dict:
-    """Roll findings into a 0-100 score + letter grade with itemized deductions."""
+    """Roll findings into a 0-100 score + letter grade with itemized deductions.
+    When no binary was examined (missing/unreadable executable, unparsable
+    Info.plist) there is nothing to grade: score None / grade "n/a"."""
+    if report.get("binary_examined") is False:
+        return {"score": None, "grade": "n/a", "deductions": [],
+                "reason": "no binary examined (executable missing or Info.plist unparsable)"}
     score = 100
     items = []
 
@@ -508,6 +579,39 @@ def _strings_of(bin_path: Path | None) -> bytes:
         return bin_path.read_bytes()
     except OSError:
         return b""
+
+
+_MACHO_MAGICS = (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",   # fat
+                 b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",   # 64-bit
+                 b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce")   # 32-bit
+
+
+def _framework_macho_blob(zf: zipfile.ZipFile, app_dir: str,
+                          cap: int = 80 * 1024 * 1024) -> bytes:
+    """Concatenated raw bytes of embedded framework Mach-O executables, for scans
+    (StoreKit / receipt / SDK tokens) that must see code living in frameworks, not
+    just the main binary. ASCII tokens we look for live in the binary's __cstring
+    sections, so raw-byte substring search needs no `strings` pass. Capped."""
+    prefix = f"{app_dir}/Frameworks/"
+    out = bytearray()
+    for n in zf.namelist():
+        if not n.startswith(prefix):
+            continue
+        rest = n[len(prefix):].split("/")
+        if len(rest) != 2 or not rest[0].endswith(".framework"):
+            continue
+        if rest[1] != rest[0][:-len(".framework")]:   # the framework's main binary
+            continue
+        try:
+            data = zf.read(n)
+        except (OSError, KeyError):
+            continue
+        if data[:4] not in _MACHO_MAGICS:
+            continue
+        out += data
+        if len(out) >= cap:
+            break
+    return bytes(out)
 
 
 def dependencies(zf: zipfile.ZipFile, app_dir: str) -> list[dict]:
@@ -669,15 +773,17 @@ def config_findings(info: dict, ats_d: dict, priv: dict, secrets: dict) -> list[
     return out
 
 
-def analyze_ipa(ipa_path: str) -> dict:
-    """Full deep-analysis report for one decrypted IPA. Best-effort per section."""
+def analyze_ipa(ipa_path: str, app_store_has_iap: bool | None = None) -> dict:
+    """Full deep-analysis report for one decrypted IPA. Best-effort per section.
+    `app_store_has_iap` is the App Store "offers IAP" flag, used to reconcile the
+    static IAP detector (latent StoreKit symbols vs an actual IAP offering)."""
     result: dict = {"info_plist": {}, "entitlements": {}, "ats": {},
                     "frameworks": {}, "sdks": [], "secrets": {},
                     "file_tree": [], "crypto_hints": [],
                     "binary_protections": {}, "insecure_apis": [],
                     "binary_type": "unknown", "security_score": {}, "trackers": [],
                     "dependencies": [], "privacy_manifest": {}, "bundled_certs": [],
-                    "app_extensions": []}
+                    "app_extensions": [], "iap": {}, "binary_examined": False}
     tmp = Path(tempfile.mkdtemp(prefix="havva-analysis-"))
     try:
         with zipfile.ZipFile(ipa_path) as zf:
@@ -699,9 +805,16 @@ def analyze_ipa(ipa_path: str) -> dict:
             result["frameworks"] = _safe(frameworks, zf, app_dir, bin_path)
             result["entitlements"] = _safe(entitlements, bin_path)
 
+            result["binary_examined"] = bool(bin_path and bin_path.exists())
+            # Evidence = `strings` (cstrings, no symbol table on macOS) + `nm`
+            # (symbol table). Symbol-shaped rules (_objc_msgSend, _CC_MD5,
+            # _strcpy, kSecAttrAccessibleAlways, SecTrustEvaluate...) only fire
+            # on the nm half, so every symbol scan must see the combined blob.
             blob = _strings_of(bin_path)
-            result["sdks"] = fingerprint_sdks(result["frameworks"], blob)
-            result["crypto_hints"] = crypto_hints(blob)
+            nm_blob = _nm(bin_path) if bin_path else b""
+            evidence = blob + b"\n" + nm_blob
+            result["sdks"] = fingerprint_sdks(result["frameworks"], evidence)
+            result["crypto_hints"] = crypto_hints(evidence)
             result["secrets"] = scan_secrets(blob)
             # emails + domains live alongside URLs in the secrets section
             result["secrets"].update(_safe(emails_domains, blob))
@@ -709,7 +822,7 @@ def analyze_ipa(ipa_path: str) -> dict:
             result["privacy_manifest"] = _safe(privacy_manifest, zf, app_dir)
             result["bundled_certs"] = _safe(bundled_certs, zf, app_dir)
             result["app_extensions"] = _safe(app_extensions, zf, app_dir)
-            result["insecure_apis"] = _safe(insecure_apis, blob)
+            result["insecure_apis"] = _safe(insecure_apis, evidence)
             if result["bundled_certs"]:
                 result["insecure_apis"].append({
                     "category": "Bundled certificate/key files (possible pinning-by-cert)",
@@ -717,7 +830,22 @@ def analyze_ipa(ipa_path: str) -> dict:
             result["insecure_apis"] += debuggable_findings(result["entitlements"])
             result["insecure_apis"] += config_findings(
                 result["info_plist"], result["ats"], result["privacy_manifest"], result["secrets"])
-            result["binary_type"] = binary_type(result["frameworks"], blob)
+            result["binary_type"] = binary_type(result["frameworks"], evidence)
+            # Static IAP security profile (StoreKit gen, validation path, endpoints).
+            # Scan the main binary PLUS embedded framework binaries: modular apps
+            # (e.g. Telegram) keep their IAP/StoreKit code in a framework, not the
+            # main executable, so a main-binary-only scan misses it.
+            try:
+                from . import iap_static
+                fw_blob = _framework_macho_blob(zf, app_dir)
+                # Full bundle namelist (file_tree is capped and would miss a
+                # .storekit config buried under thousands of assets).
+                bundle_files = [n for n in zf.namelist() if n.startswith(f"{app_dir}/")]
+                result["iap"] = iap_static.analyze(
+                    blob + b"\n" + fw_blob, nm_blob, result["frameworks"],
+                    bundle_files, app_store_has_iap=app_store_has_iap)
+            except Exception as e:  # noqa: BLE001
+                log.warning("iap_static failed: %s", e)
             result["trackers"] = detect_trackers(result["secrets"])
             # Dependency versions + known-CVE lookup (network, cached on disk).
             result["dependencies"] = _safe(dependencies, zf, app_dir)
@@ -751,7 +879,17 @@ def analyze_one(db: Database, app_id: str, log_fn=None) -> dict:
     if not Path(ipa).exists():
         raise RuntimeError(f"decrypted IPA missing on disk: {ipa}")
     _log(f"analyzing {ipa}\n")
-    report = analyze_ipa(ipa)
+    # Pass the App Store "offers IAP" flag so the static IAP detector can tell a
+    # real IAP offering from latent StoreKit symbols (reviews/ads/dead code).
+    has_iap = None
+    try:
+        with db.connect() as c:
+            row = c.execute("SELECT has_iap FROM apps WHERE app_id=?", (app_id,)).fetchone()
+        if row is not None and row["has_iap"] is not None:
+            has_iap = bool(row["has_iap"])
+    except Exception:  # noqa: BLE001
+        has_iap = None
+    report = analyze_ipa(ipa, app_store_has_iap=has_iap)
     db.save_analysis(app_id, report)
     # Backfill the bundle id from the Info.plist (the crawl often lacks it).
     bid = (report.get("info_plist", {}).get("summary", {}) or {}).get("CFBundleIdentifier")

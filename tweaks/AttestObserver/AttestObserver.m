@@ -64,14 +64,25 @@ static void swizzleAndVerify(Class cls, SEL orig, SEL repl) {
     else                 MARK(@"HOOK_FAILED %@", NSStringFromSelector(orig));
 }
 
+// Install-once guards. method_exchangeImplementations is an INVOLUTION: running
+// it a second time on the same pair swaps the hooks back OFF. The retry timers
+// below each call installHooks(), so without these flags a class that appears
+// at 2s would be hooked at 2s and silently un-hooked at 4s, turning a real
+// "present and called" into a false "present, not called". Each class is
+// exchanged at most once per process; HOOK_VERIFIED is therefore emitted once.
+static BOOL g_attestInstalled = NO;
+static BOOL g_dcdevInstalled  = NO;
+
 static BOOL installHooks(void) {
-    Class attest = NSClassFromString(@"DCAppAttestService");
-    Class dcdev  = NSClassFromString(@"DCDevice");
+    Class attest = g_attestInstalled ? Nil : NSClassFromString(@"DCAppAttestService");
+    Class dcdev  = g_dcdevInstalled  ? Nil : NSClassFromString(@"DCDevice");
+    if (g_attestInstalled && g_dcdevInstalled) return YES;   // nothing left to do
     if (!attest && !dcdev) {
-        MARK(@"CLASS_ABSENT DCAppAttestService");
-        return NO;
+        if (!g_attestInstalled && !g_dcdevInstalled) MARK(@"CLASS_ABSENT DCAppAttestService");
+        return g_attestInstalled || g_dcdevInstalled;
     }
     if (attest) {
+        g_attestInstalled = YES;   // set BEFORE exchanging: never exchange twice
         MARK(@"CLASS_PRESENT DCAppAttestService");
         swizzleAndVerify(attest, @selector(generateKeyWithCompletionHandler:),
                          @selector(obs_generateKeyWithCompletionHandler:));
@@ -81,6 +92,7 @@ static BOOL installHooks(void) {
                          @selector(obs_generateAssertion:clientDataHash:completionHandler:));
     }
     if (dcdev) {
+        g_dcdevInstalled = YES;
         MARK(@"CLASS_PRESENT DCDevice");
         swizzleAndVerify(dcdev, @selector(generateTokenWithCompletionHandler:),
                          @selector(obs_generateTokenWithCompletionHandler:));
@@ -91,14 +103,19 @@ static BOOL installHooks(void) {
 __attribute__((constructor))
 static void attestobserver_init(void) {
     MARK(@"OBSERVER_LOADED");
-    if (installHooks()) return;
-    // DeviceCheck may load lazily; retry a few times before giving up.
+    // DeviceCheck.framework may load lazily; retry a few times before giving up.
+    // Both classes live in the same framework, so once either is hooked the
+    // framework is up; the per-class flags make every later call a no-op for
+    // classes already exchanged (see the involution note above).
+    BOOL first = installHooks();
+    if (first && g_attestInstalled && g_dcdevInstalled) return;
     for (int i = 1; i <= 3; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            if (g_attestInstalled && g_dcdevInstalled) return;   // installed: never re-exchange
             if (NSClassFromString(@"DCAppAttestService") || NSClassFromString(@"DCDevice")) {
                 installHooks();
-            } else if (i == 3) {
+            } else if (i == 3 && !g_attestInstalled && !g_dcdevInstalled) {
                 MARK(@"CLASS_ABSENT_FINAL");
             }
         });

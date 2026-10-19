@@ -14,6 +14,7 @@ Resumable via the outcome work queue.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from . import capture, device, escalate, instrument
@@ -60,14 +61,15 @@ class LaunchProbe:
 
 
 def _launch_probe(app_id: str, bundle_id: str, decrypted_ipa: str, label: str,
-                  specs, sign_env, secs: int) -> LaunchProbe:
+                  specs, sign_env, secs: int, entshim: bool = False) -> LaunchProbe:
     """Build + install + launch, wait `secs`, check liveness, uninstall. No
     Proxyman capture -- this only asks 'did the app stay running?'."""
     import time
     rs = CONFIG.signing.resolve(sign_env)
     prefer = "devicectl" if rs.get_task_allow else "pmd3"
     log.info("[%s] building (%s signing) ...", label, rs.env)
-    ok, signed, err = instrument.build(app_id, decrypted_ipa, label, specs=specs, sign_env=sign_env)
+    ok, signed, err = instrument.build(app_id, decrypted_ipa, label, specs=specs,
+                                       sign_env=sign_env, entshim=entshim)
     if not ok:
         log.warning("  build failed: %s", err)
         return LaunchProbe(label, False, False, False, False, False, err)
@@ -76,10 +78,18 @@ def _launch_probe(app_id: str, bundle_id: str, decrypted_ipa: str, label: str,
         log.warning("  install failed: %s", ierr)
         return LaunchProbe(label, True, False, False, False, False, ierr)
     log.info("  installed; launching + waiting %ss ...", secs)
+    # Consume any report left on the device (e.g. the control run's) so this
+    # probe's fetch only sees a crash that happened AFTER this launch.
+    device.flush_crash_reports()
     pid = device.launch(bundle_id, prefer=prefer)
     launched = pid is not None
     time.sleep(secs)
-    alive = launched and device.is_app_running(bundle_id)
+    # is_app_running is tri-state (None = unknown). Only a definite False means
+    # the app exited; an unknown must not become a false "detected".
+    running = device.is_app_running(bundle_id) if launched else False
+    if launched and running is None:
+        log.warning("  liveness unknown (device query failed); not treating as exited")
+    alive = bool(launched) and running is not False
     crashed = bool(device.fetch_crash_report(bundle_id))
     log.info("  launched=%s alive=%s crashed=%s", launched, alive, crashed)
     device.terminate(pid, bundle_id)
@@ -88,7 +98,7 @@ def _launch_probe(app_id: str, bundle_id: str, decrypted_ipa: str, label: str,
 
 
 def inspect_storage(db: Database, row, sign_env: str | None = None,
-                    monitor_seconds=None) -> dict:
+                    monitor_seconds=None, entshim=False) -> dict:
     """Dynamic insecure-data-storage check. Runs the app, pulls its data
     container via house_arrest/AFC, and scans the unencrypted stores
     (NSUserDefaults / SQLite / Core Data / Realm / Cookies / keyboard cache)
@@ -116,7 +126,8 @@ def inspect_storage(db: Database, row, sign_env: str | None = None,
 
     log.info("[storage] building (%s signing) + installing", rs.env)
     specs = instrument.custom_specs(["sideloadfix"], aliased=False)
-    ok, signed, err = instrument.build(app_id, decrypted, "storage", specs=specs, sign_env=sign_env)
+    ok, signed, err = instrument.build(app_id, decrypted, "storage", specs=specs,
+                                       sign_env=sign_env, entshim=entshim)
     if not ok:
         raise RuntimeError(f"build failed: {err}")
     installed, ierr = device.install_ipa(signed)
@@ -158,7 +169,7 @@ def inspect_storage(db: Database, row, sign_env: str | None = None,
 
 def detect_iap_bypass(db: Database, row, driver: device.UIDriver,
                       sign_env: str | None = None, monitor_seconds=None,
-                      swap_certs=False) -> dict:
+                      swap_certs=False, entshim=False, stop_check=None) -> dict:
     """In-app-purchase / subscription bypass detection (paper 1's phase_2). Runs
     the app with pinning bypassed (so IAP traffic is visible), captures the
     decrypted flows, and asks the Llama API whether any IAP field is
@@ -176,7 +187,8 @@ def detect_iap_bypass(db: Database, row, driver: device.UIDriver,
     log.info("[iap] launching with pinning bypass to capture IAP traffic")
     specs = instrument.custom_specs(["ssks", "sideloadfix"], aliased=True)
     run = run_config(app_id, bundle_id, decrypted, "iap", driver, specs=specs,
-                     sign_env=sign_env, monitor_seconds=monitor_seconds, swap_certs=swap_certs)
+                     sign_env=sign_env, monitor_seconds=monitor_seconds, swap_certs=swap_certs,
+                     entshim=entshim, stop_check=stop_check)
     flows = run.flows or []
     iap = iap_bypass.iap_flows(flows)
     log.info("[iap] %d captured flow(s), %d IAP-related", len(flows), len(iap))
@@ -191,7 +203,7 @@ def detect_iap_bypass(db: Database, row, driver: device.UIDriver,
 
 
 def detect_sideload(db: Database, row, sign_env: str | None = None,
-                    monitor_seconds=None) -> dict:
+                    monitor_seconds=None, entshim=False) -> dict:
     """Sideload / anti-resign detection via a differential launch:
       control : plain re-sign, NOTHING injected.
       fix     : SideloadFix injected.
@@ -208,10 +220,12 @@ def detect_sideload(db: Database, row, sign_env: str | None = None,
     secs = int(monitor_seconds) if monitor_seconds else 5
 
     log.info("[sideload] control run: plain re-sign, no SideloadFix")
-    control = _launch_probe(app_id, bundle_id, decrypted, "sideload:control", [], sign_env, secs)
+    control = _launch_probe(app_id, bundle_id, decrypted, "sideload:control", [], sign_env, secs,
+                            entshim=entshim)
     log.info("[sideload] fix run: SideloadFix injected")
     slf_specs = instrument.custom_specs(["sideloadfix"], aliased=False)
-    fixed = _launch_probe(app_id, bundle_id, decrypted, "sideload:sideloadfix", slf_specs, sign_env, secs)
+    fixed = _launch_probe(app_id, bundle_id, decrypted, "sideload:sideloadfix", slf_specs, sign_env, secs,
+                          entshim=entshim)
 
     c, f = control.survived, fixed.survived
     if not control.built or not fixed.built:
@@ -274,21 +288,25 @@ class _CaptureRunLog:
 
 def run_config(app_id: str, bundle_id: str, decrypted_ipa: str, config: str,
                driver: device.UIDriver, specs=None, sign_env=None,
-               monitor_seconds=None, swap_certs=False) -> ConfigRun:
+               monitor_seconds=None, swap_certs=False, login=False,
+               entshim=False, stop_check=None) -> ConfigRun:
     """Build + install + drive + capture one config, recording this run's own
-    log lines onto the returned ConfigRun."""
+    log lines onto the returned ConfigRun. `stop_check` (callable -> bool) is
+    polled by the driver so a cancelled job stops driving the device."""
     cap = _CaptureRunLog()
     with cap:
         run = _run_config_impl(app_id, bundle_id, decrypted_ipa, config, driver,
                                specs=specs, sign_env=sign_env,
-                               monitor_seconds=monitor_seconds, swap_certs=swap_certs)
+                               monitor_seconds=monitor_seconds, swap_certs=swap_certs,
+                               login=login, entshim=entshim, stop_check=stop_check)
     run.run_log = cap.text()
     return run
 
 
 def _run_config_impl(app_id: str, bundle_id: str, decrypted_ipa: str, config: str,
                      driver: device.UIDriver, specs=None, sign_env=None,
-                     monitor_seconds=None, swap_certs=False) -> ConfigRun:
+                     monitor_seconds=None, swap_certs=False, login=False,
+                     entshim=False, stop_check=None) -> ConfigRun:
     """Build + install + drive + capture one config. If `specs` is given, inject
     exactly those dylibs (a custom selection). `sign_env` ("dev"/"dist") picks
     the cert+profile and the matching launch path. `monitor_seconds` overrides
@@ -299,7 +317,8 @@ def _run_config_impl(app_id: str, bundle_id: str, decrypted_ipa: str, config: st
     log.info("[%s] building instrumented IPA (%s signing%s)", config, rs.env,
              ", cert-swap" if swap_certs else "")
     ok, signed, err = instrument.build(app_id, decrypted_ipa, config, specs=specs,
-                                       sign_env=sign_env, swap_certs=swap_certs)
+                                       sign_env=sign_env, swap_certs=swap_certs,
+                                       entshim=entshim)
     if not ok:
         log.warning("%s build %s failed: %s", app_id, config, err)
         return ConfigRun(config, False, False, CrashClass.NONE, set(), False, "none")
@@ -313,36 +332,72 @@ def _run_config_impl(app_id: str, bundle_id: str, decrypted_ipa: str, config: st
 
     capture.check_connection()
     capture.clear_session()
+    device.flush_crash_reports()  # so a stale crash from an earlier run isn't mis-read
 
-    creds = None  # supplied per app by attestation/auth stage when available
-    log.info("launching + driving app for %ss (capturing traffic) ...", secs)
-    dr = driver.drive(bundle_id, secs, login=bool(creds), prefer=prefer)
+    creds = None
+    if login:
+        from . import attestation
+        creds = attestation.creds_for(attestation.load_accounts(), app_id, bundle_id)
+        if creds:
+            driver.credentials = creds   # AppiumDriver logs in with these
+        else:
+            log.info("UI login requested but no accounts.json entry for %s / %s",
+                     app_id, bundle_id)
+    log.info("launching + driving app for %ss (capturing traffic%s) ...", secs,
+             ", UI login" if creds else "")
+    dr = driver.drive(bundle_id, secs, login=bool(creds), prefer=prefer,
+                      stop_check=stop_check)
 
     safe = config.replace(":", "_")
     har_path = CONFIG.paths.results_dir / f"{app_id}_{safe}.har"
-    capture.export_har(har_path)
+    sess_path = CONFIG.paths.results_dir / f"{app_id}_{safe}.proxymansession"
+    # Remove the previous run's exports FIRST: a failed export must never
+    # silently reuse last run's HAR/session as this run's evidence.
+    for stale in (har_path, sess_path, *sess_path.parent.glob(sess_path.name + "*")):
+        try:
+            if stale.is_file():
+                stale.unlink()
+        except OSError:
+            pass
+    if not capture.export_har(har_path):
+        log.warning("  HAR export failed (no file); treating as no decrypted traffic")
     har = capture.load_har(har_path)
     flows = capture.har_to_flows(har, CONFIG.test_device.client_ip)
     hosts = capture.app_hosts(flows)
-    reached = capture.reached_any_network(flows)
+    reached = capture.reached_any_network(flows)   # non-excluded hosts only
 
     # Native session: per-host TLS outcome, including undecrypted tunnels.
     conn_outcomes: dict = {}
-    sess_path = CONFIG.paths.results_dir / f"{app_id}_{safe}.proxymansession"
     if capture.export_session(sess_path):
         conn_outcomes = capture.session_host_outcomes(sess_path)
         pinned_now = [h for h, o in conn_outcomes.items() if o == "pinned"]
         if pinned_now:
-            log.info("  %d host(s) refused our CA (pinning our MITM couldn't break): %s",
+            log.info("  %d host(s) with TLS-flavoured upstream failures (possible pinning; "
+                     "upstream leg only, confirm manually): %s",
                      len(pinned_now), ", ".join(sorted(pinned_now)[:6]))
-    if dr.crashed:
-        log.info("  app crashed on launch (possible tamper detection)")
+
+    # Two crash signals, trusted differently:
+    #   died         : the LIVE liveness watch saw the process exit during the
+    #                  window. Trustworthy; never suppressed by traffic (an app
+    #                  can talk first and then kill itself on a tamper check).
+    #   report_crash : a crash report was fetched. Only means launch-failure /
+    #                  tamper if the app did NOT run; after a launched run that
+    #                  produced traffic it is teardown/stale noise.
+    died = bool(getattr(dr, "died", False))
+    report_crash = bool(dr.crash_report) and not died
+    effective_crashed = died or (report_crash and not (dr.launched and reached))
+    if effective_crashed:
+        log.info("  app crashed/exited (%s; possible tamper detection)",
+                 "liveness: process exited during the window" if died
+                 else "crash report, no traffic before it")
     elif hosts:
         log.info("  captured %d app host(s): %s", len(hosts), ", ".join(sorted(hosts)[:6]))
     elif reached:
         log.info("  reached network but no plaintext hosts (still pinned?)")
     else:
         log.info("  no traffic captured")
+    if report_crash and not effective_crashed:
+        log.info("  (ignored a crash report: app launched and produced traffic)")
 
     crash_class = escalate.classify_crash(dr.crash_report, dr.launched, reached)
     device.uninstall(bundle_id)
@@ -352,18 +407,64 @@ def _run_config_impl(app_id: str, bundle_id: str, decrypted_ipa: str, config: st
     # so decrypted traffic doesn't linger and can't bleed into the next run.
     capture.clear_session()
 
-    return ConfigRun(config, ran=dr.launched and not dr.crashed, crashed=dr.crashed,
+    return ConfigRun(config, ran=dr.launched and not effective_crashed, crashed=effective_crashed,
                      crash_class=crash_class, hosts=hosts, reached_network=reached,
                      login_status=dr.login_status, crash_report=dr.crash_report,
                      conn_outcomes=conn_outcomes, flows=flows)
 
 
+# Catalog ids that actually defeat pinning / hooks. Injecting only helper dylibs
+# (sideloadfix, entshim, attest) is NOT a bypass, so traffic seen with only those
+# loaded means the host was never pinned.
+BYPASS_DYLIB_IDS = frozenset({"ssks", "frida", "evasion"})
+_LABEL_RE = re.compile(r"^[A-Za-z0-9_:.,-]+$")
+
+
+def validate_dylib_ids(dylib_ids: list[str]) -> list[str]:
+    """Reject anything that is not a known catalog id. The ids end up in the
+    run label, which names a work directory that gets rmtree'd, so an
+    unvalidated id is a path-traversal primitive."""
+    known = {it["id"] for it in instrument.dylib_catalog()}
+    out: list[str] = []
+    for x in dylib_ids:
+        if not isinstance(x, str) or x not in known:
+            raise ValueError(f"unknown dylib id: {x}")
+        out.append(x)
+    return out
+
+
+def _check_label(label: str) -> str:
+    if not label or not _LABEL_RE.match(label):
+        raise ValueError(f"invalid run label: {label!r}")
+    return label
+
+
+def custom_outcome(run: ConfigRun, dylib_ids: list[str]) -> tuple[Outcome, BypassStage, bool, WorkState]:
+    """Pure: outcome/stage/pinned/state for a custom run. Only a selection that
+    includes a real bypass dylib may be graded BYPASSED; traffic seen with only
+    helper dylibs loaded means NOT_PINNED."""
+    has_bypass = any(x in BYPASS_DYLIB_IDS for x in dylib_ids)
+    if run.hosts:
+        if has_bypass:
+            return Outcome.BYPASSED, BypassStage.DYLIB, True, WorkState.POSITIVE
+        return Outcome.NOT_PINNED, BypassStage.NONE, False, WorkState.DONE_NEGATIVE
+    stage = BypassStage.DYLIB if has_bypass else BypassStage.NONE
+    if run.crashed:
+        return Outcome.TAMPER_DETECTED, stage, False, WorkState.UNTESTED
+    if run.reached_network:
+        return Outcome.PINNED_UNBYPASSED, stage, has_bypass, WorkState.UNTESTED
+    return Outcome.INCONCLUSIVE, stage, False, WorkState.UNTESTED
+
+
 def run_custom(db: Database, row, driver: device.UIDriver,
                dylib_ids: list[str], aliased: bool = True,
                sign_env: str | None = None, monitor_seconds=None,
-               swap_certs=False) -> ConfigRun:
+               swap_certs=False, stop_check=None) -> ConfigRun:
     """Run ONE dynamic pass injecting the user-selected dylibs, record it, and
-    save an outcome. Returns the ConfigRun."""
+    save an outcome. Returns the ConfigRun. Raises ValueError on an unknown
+    dylib id (before anything touches the disk)."""
+    dylib_ids = validate_dylib_ids(list(dylib_ids))
+    label = _check_label("custom:" + ",".join(dylib_ids))
     app_id = row["app_id"]
     ac = db.get_acquisition(app_id)
     decrypted = ac["ipa_path"] if ac else ""
@@ -374,23 +475,20 @@ def run_custom(db: Database, row, driver: device.UIDriver,
         raise RuntimeError("no bundle id (not in DB and unreadable from IPA)")
     db.clear_dynamic_runs(app_id)
     specs = instrument.custom_specs(dylib_ids, aliased=aliased)
-    label = "custom:" + ",".join(dylib_ids)
     run = run_config(app_id, bundle_id, decrypted, label, driver, specs=specs,
                      sign_env=sign_env, monitor_seconds=monitor_seconds,
-                     swap_certs=swap_certs)
+                     swap_certs=swap_certs, stop_check=stop_check)
     db.add_dynamic_run(app_id, label, "ran" if run.ran else "fail",
                        run.crash_class, len(run.hosts), run.login_status, log=run.run_log)
-    outcome = (Outcome.BYPASSED if run.hosts else
-               Outcome.TAMPER_DETECTED if run.crashed else
-               Outcome.PINNED_UNBYPASSED if run.reached_network else Outcome.INCONCLUSIVE)
-    state = WorkState.POSITIVE if outcome == Outcome.BYPASSED else WorkState.UNTESTED
-    db.save_outcome(app_id, outcome, BypassStage.DYLIB, True, state)
+    outcome, stage, pinned, state = custom_outcome(run, dylib_ids)
+    db.save_outcome(app_id, outcome, stage, pinned, state)
     return run
 
 
 def detect_pinning(db: Database, row, driver: device.UIDriver,
                    aliased: bool = True, sign_env: str | None = None,
-                   monitor_seconds=None, swap_certs=False) -> dict:
+                   monitor_seconds=None, swap_certs=False, login=False,
+                   entshim=False, stop_check=None) -> dict:
     """Differential per-endpoint SSL-pinning detection via Proxyman.
 
     Two MITM runs, both proxying `*`:
@@ -424,18 +522,44 @@ def detect_pinning(db: Database, row, driver: device.UIDriver,
     log.info("[pinning] clean run (no bypass): endpoints that decrypt on their own")
     clean_specs = instrument.custom_specs(["sideloadfix"], aliased=aliased)
     clean = run_config(app_id, bundle_id, decrypted, "pinning:clean", driver,
-                       specs=clean_specs, sign_env=sign_env, monitor_seconds=monitor_seconds)
+                       specs=clean_specs, sign_env=sign_env, monitor_seconds=monitor_seconds,
+                       login=login, entshim=entshim, stop_check=stop_check)
     db.add_dynamic_run(app_id, "pinning:clean", "ran" if clean.ran else "fail",
                        clean.crash_class, len(clean.hosts), clean.login_status, log=clean.run_log)
+
+    # If the baseline build crashed / exited on launch, the app refuses to run
+    # re-signed (anti-tamper / integrity enforcement). The bypass build is the same
+    # re-sign plus SSKS, so it would die identically -- skip it, and report tamper
+    # detection (a real finding), not "inconclusive".
+    if clean.crashed:
+        log.warning("[pinning] baseline crashed/exited on launch (anti-tamper); "
+                    "skipping the bypass run")
+        db.save_outcome(app_id, Outcome.TAMPER_DETECTED, BypassStage.NONE, False,
+                        WorkState.DONE_NEGATIVE)
+        return {"pinned": [], "hard_pinned": [], "not_pinned": [], "unresolved": [],
+                "reliable": False, "crashed": True,
+                "clean_reached": clean.reached_network, "bypass_reached": False}
 
     # Run 2: bypass -- SSL Kill Switch, so pinned endpoints decrypt too.
     log.info("[pinning] bypass run (SSL Kill Switch): all endpoints incl. pinned")
     bypass_specs = instrument.custom_specs(["ssks", "sideloadfix"], aliased=aliased)
     byp = run_config(app_id, bundle_id, decrypted, "pinning:bypass", driver,
                      specs=bypass_specs, sign_env=sign_env, monitor_seconds=monitor_seconds,
-                     swap_certs=swap_certs)
+                     swap_certs=swap_certs, login=login, entshim=entshim, stop_check=stop_check)
     db.add_dynamic_run(app_id, "pinning:bypass", "ran" if byp.ran else "fail",
                        byp.crash_class, len(byp.hosts), byp.login_status, log=byp.run_log)
+
+    # The clean build ran but the SSKS build died: the app noticed the hook
+    # (anti-hook / integrity check), not "no pinning". Without a bypass run
+    # there is no differential, so do NOT fall through to NOT_PINNED/BYPASSED.
+    if byp.crashed:
+        log.warning("[pinning] bypass run crashed/exited (possible anti-hook detection); "
+                    "no differential available")
+        db.save_outcome(app_id, Outcome.INCONCLUSIVE, BypassStage.DYLIB, False,
+                        WorkState.UNTESTED)
+        return {"pinned": [], "hard_pinned": [], "not_pinned": [], "unresolved": [],
+                "reliable": False, "crashed": False, "crashed_bypass": True,
+                "clean_reached": clean.reached_network, "bypass_reached": byp.reached_network}
 
     # A clean run that crashed gives no baseline -> the open/bypassable split
     # would be all false positives. Only trust that split if it launched.
@@ -491,11 +615,25 @@ def detect_pinning(db: Database, row, driver: device.UIDriver,
         db.save_outcome(app_id, Outcome.INCONCLUSIVE, BypassStage.NONE, False, WorkState.UNTESTED)
 
     return {"pinned": bypassable, "hard_pinned": hard_pinned, "not_pinned": both,
-            "unresolved": unresolved, "reliable": reliable,
+            "unresolved": unresolved, "reliable": reliable, "crashed": False,
+            "crashed_bypass": False,
             "clean_reached": clean.reached_network, "bypass_reached": byp.reached_network}
 
 
-def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
+def ladder_tail_inputs(runs: list) -> tuple[bool, bool, bool]:
+    """Pure: (all_crashed, any_ran, reached) for the oracle, computed over the
+    BYPASS rungs only. The stage0 baseline and the control re-sign are not
+    bypass attempts, so a clean stage0 must not mask 'every bypass rung
+    crashed' (which is the TAMPER_DETECTED signal)."""
+    bypass_runs = [r for r in runs if r.config not in ("stage0", "control")]
+    all_crashed = bool(bypass_runs) and all(r.crashed for r in bypass_runs)
+    any_ran = any(r.ran for r in bypass_runs)
+    reached = any(r.reached_network for r in runs)
+    return all_crashed, any_ran, reached
+
+
+def process_app(db: Database, row, driver: device.UIDriver, entshim: bool = False,
+                stop_check=None) -> Outcome:
     app_id = row["app_id"]
     with db.connect() as c:
         ac = c.execute("SELECT ipa_path FROM acquisition WHERE app_id=?", (app_id,)).fetchone()
@@ -513,7 +651,8 @@ def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
     runs: list[ConfigRun] = []
 
     # Stage 0: baseline, no bypass.
-    s0 = run_config(app_id, bundle_id, decrypted, "stage0", driver)
+    s0 = run_config(app_id, bundle_id, decrypted, "stage0", driver, entshim=entshim,
+                    stop_check=stop_check)
     runs.append(s0)
     db.add_dynamic_run(app_id, "stage0", "ran" if s0.ran else "fail",
                        s0.crash_class, len(s0.hosts), s0.login_status, log=s0.run_log)
@@ -523,7 +662,8 @@ def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
         return Outcome.NOT_PINNED
 
     # First bypass rung: plain dylib.
-    dylib = run_config(app_id, bundle_id, decrypted, BypassStage.DYLIB.value, driver)
+    dylib = run_config(app_id, bundle_id, decrypted, BypassStage.DYLIB.value, driver,
+                       entshim=entshim, stop_check=stop_check)
     runs.append(dylib)
     per_config.append((BypassStage.DYLIB, dylib.hosts))
     db.add_dynamic_run(app_id, BypassStage.DYLIB.value, "ran" if dylib.ran else "fail",
@@ -533,7 +673,8 @@ def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
     ladder: list[BypassStage] = []
     if not dylib.hosts:
         if dylib.crashed:
-            control = run_config(app_id, bundle_id, decrypted, "control", driver)
+            control = run_config(app_id, bundle_id, decrypted, "control", driver,
+                                 entshim=entshim, stop_check=stop_check)
             runs.append(control)
             db.add_dynamic_run(app_id, "control", "ran" if control.ran else "fail",
                                control.crash_class, len(control.hosts), control.login_status,
@@ -548,7 +689,8 @@ def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
             db.add_dynamic_run(app_id, stage.value, "queued_manual",
                                CrashClass.NONE, 0, "none")
             continue
-        r = run_config(app_id, bundle_id, decrypted, stage.value, driver)
+        r = run_config(app_id, bundle_id, decrypted, stage.value, driver, entshim=entshim,
+                       stop_check=stop_check)
         runs.append(r)
         per_config.append((stage, r.hosts))
         db.add_dynamic_run(app_id, stage.value, "ran" if r.ran else "fail",
@@ -556,10 +698,8 @@ def process_app(db: Database, row, driver: device.UIDriver) -> Outcome:
         if r.hosts:
             break  # cheapest working stage found
 
-    any_ran = any(r.ran for r in runs if r.config != "stage0") or s0.ran
-    all_crashed = all(r.crashed for r in runs if r.config not in ("stage0", "control")) \
-        and not any_ran
-    reached = any(r.reached_network for r in runs)
+    # Over bypass rungs only: a clean stage0 must not mask "every bypass crashed".
+    all_crashed, any_ran, reached = ladder_tail_inputs(runs)
     login_completed = any(r.login_status in ("success", "not_needed") for r in runs)
 
     result = decide(OracleInput(

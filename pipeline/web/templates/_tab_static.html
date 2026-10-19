@@ -186,7 +186,7 @@
   {% set vuln_deps = a['dependencies']|selectattr('cves')|list %}
   <details class="card" {% if vuln_deps %}open{% endif %}><summary><span class="caret">›</span>Dependencies &amp; known CVEs <span class="muted" style="font-weight:500">({{ a['dependencies']|length }} deps{% if vuln_deps %}, <span style="color:var(--bad)">{{ vuln_deps|length }} vulnerable</span>{% endif %})</span></summary>
     <div class="dbody">
-      {% for d in a['dependencies']|sort(attribute='cves', reverse=true) %}
+      {% for d in a['dependencies']|sort(attribute='n_cves', reverse=true) %}
       <div style="padding:7px 0;border-top:1px solid var(--hair);font-size:12.5px">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <span class="mono" style="font-weight:600">{{ d['name'] }}</span>

@@ -25,47 +25,98 @@ GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
 _G_CODE = re.compile(r"\bG-(\d{4,8})\b")
 _CODE_NEAR = re.compile(
-    r"(?:code|verification|verify|otp|passcode|one[\s-]?time)[^0-9]{0,24}(\d{4,8})", re.I)
+    r"(?:code|verification|verify|otp|passcode|pin|one[\s-]?time)[^0-9]{0,24}(\d{4,8})", re.I)
 _STANDALONE = re.compile(r"(?<!\d)(\d{4,8})(?!\d)")
+
+# Clock skew tolerated between Gmail's internalDate and our local `after`
+# timestamp: a message stamped slightly before we started waiting still counts.
+CLOCK_SKEW_MS = 30_000
+
+
+def _looks_like_year(c: str) -> bool:
+    return len(c) == 4 and c.startswith(("19", "20"))
+
+# Google Voice wraps the SMS text in boilerplate (links, the sender's number, a
+# footer). Those contain digit runs that are NOT the code, so for the standalone
+# fallback we first isolate the actual message text and strip that noise.
+_GV_FOOTER = re.compile(
+    r"(to respond to this text message|your account\b|get the google voice app|"
+    r"this message was sent|unsubscribe)", re.I)
+_URL = re.compile(r"https?://\S+")
+_PHONE = re.compile(r"\+?\d{0,3}[\s.()\-]*\(?\d{3}\)?[\s.()\-]*\d{3}[\s.()\-]*\d{4}")
+
+
+def _clean_sms_body(body: str) -> str:
+    """Strip Google Voice email boilerplate so the standalone-number fallback only
+    sees the actual SMS text: cut at the first footer marker, drop URLs and
+    phone-number-shaped runs (both carry spurious digit runs)."""
+    m = _GV_FOOTER.search(body)
+    if m:
+        body = body[:m.start()]
+    body = _URL.sub(" ", body)
+    body = _PHONE.sub(" ", body)
+    return body
 
 
 def _extract_code(body: str | None) -> str | None:
     """Pull a 4-8 digit verification code out of an SMS/email body. Prefers the
-    Google 'G-123456' form, then a digit run next to a code-ish keyword, then the
-    first standalone run (skipping 4-digit years)."""
+    Google 'G-123456' form, then a digit run next to a code-ish keyword, then (only
+    after stripping Google Voice boilerplate) the first standalone run, skipping
+    4-digit years. Returns None when the message carries no code (e.g. 'Test')."""
     if not body:
         return None
     m = _G_CODE.search(body)
     if m:
         return m.group(1)
-    m = _CODE_NEAR.search(body)
-    if m:
-        return m.group(1)
-    cands = [c for c in _STANDALONE.findall(body)
-             if not (len(c) == 4 and c.startswith(("19", "20")))]
+    # Keyword path: the first keyword-adjacent run that is not a 4-digit year
+    # ("Use 1234 to verify. Sent at 2024" -> 1234, never 2024).
+    for m in _CODE_NEAR.finditer(body):
+        if not _looks_like_year(m.group(1)):
+            return m.group(1)
+    cands = [c for c in _STANDALONE.findall(_clean_sms_body(body))
+             if not _looks_like_year(c)]
     if not cands:
         return None
     six = [c for c in cands if len(c) == 6]
     return six[0] if six else cands[0]
 
 
-def _select_message(messages: list[dict], after_ms: int,
-                    sender_filter: str | None = None) -> dict | None:
-    """Newest message with internalDate >= after_ms (and matching sender_filter if
-    given). messages: [{internalDate, from, body}]. Returns the message or None."""
-    best, best_ts = None, -1
+def _candidate_messages(messages: list[dict], after_ms: int,
+                        sender_filter: str | None = None,
+                        skew_ms: int = CLOCK_SKEW_MS) -> list[dict]:
+    """All messages with internalDate >= after_ms - skew_ms (and matching
+    sender_filter if given), newest first. messages: [{internalDate, from, body}]."""
+    out = []
     for m in messages:
         try:
             ts = int(m.get("internalDate", 0))
         except (TypeError, ValueError):
             ts = 0
-        if ts < after_ms:
+        if ts < after_ms - skew_ms:
             continue
         if sender_filter and sender_filter.lower() not in str(m.get("from", "")).lower():
             continue
-        if ts > best_ts:
-            best, best_ts = m, ts
-    return best
+        out.append((ts, m))
+    out.sort(key=lambda t: t[0], reverse=True)
+    return [m for _, m in out]
+
+
+def _select_message(messages: list[dict], after_ms: int,
+                    sender_filter: str | None = None) -> dict | None:
+    """Newest candidate message (see `_candidate_messages`), or None."""
+    cands = _candidate_messages(messages, after_ms, sender_filter)
+    return cands[0] if cands else None
+
+
+def _first_code(messages: list[dict], after_ms: int,
+                sender_filter: str | None = None) -> str | None:
+    """Walk candidate messages newest-first and return the first code found, so an
+    unrelated newer message (a promo, 'Test') does not block an older OTP."""
+    for m in _candidate_messages(messages, after_ms, sender_filter):
+        code = _extract_code(m.get("body"))
+        if code:
+            return code
+    return None
 
 
 # ---- Gmail I/O --------------------------------------------------------------
@@ -145,12 +196,10 @@ def fetch(after: float | None = None, timeout: int = 90, poll: int = 5,
                 msgs.append({"id": ref["id"], "internalDate": raw.get("internalDate", 0),
                              "from": hdrs.get("from", ""),
                              "body": _decode_body(raw.get("payload") or {})})
-            pick = _select_message(msgs, after_ms)  # sender already filtered in the query
-            if pick:
-                code = _extract_code(pick["body"])
-                if code:
-                    log.info("otp: code received (%d digits)", len(code))
-                    return code
+            code = _first_code(msgs, after_ms)  # sender already filtered in the query
+            if code:
+                log.info("otp: code received (%d digits)", len(code))
+                return code
         except Exception as e:  # noqa: BLE001
             log.warning("otp poll error: %s", e)
         time.sleep(poll)

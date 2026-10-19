@@ -30,22 +30,57 @@ def _osv_enabled() -> bool:
     (curated advisories still run). Tests disable it to avoid network."""
     return os.environ.get("CVE_LOOKUP", "1").lower() not in ("0", "false", "no")
 
-# SDK / framework name (lowercased substring) -> GitHub "org/repo" for OSV swift.
+# EXACT framework name (lowercased, ".framework" stripped) -> GitHub "org/repo"
+# for the OSV swift ecosystem. Exact keys only: substring mapping sent
+# AlamofireImage to Alamofire/Alamofire and gRPC-C++ to grpc-swift, so the
+# version was checked against the wrong package's advisories.
 _SDK_REPOS = {
     "alamofire": "Alamofire/Alamofire",
+    "alamofireimage": "Alamofire/AlamofireImage",
+    "alamofirenetworkactivityindicator": "Alamofire/AlamofireNetworkActivityIndicator",
     "afnetworking": "AFNetworking/AFNetworking",
     "kingfisher": "onevcat/Kingfisher",
     "sdwebimage": "SDWebImage/SDWebImage",
+    "sdwebimageswiftui": "SDWebImage/SDWebImageSwiftUI",
+    "sdwebimagewebpcoder": "SDWebImage/SDWebImageWebPCoder",
+    "sdwebimagesvgcoder": "SDWebImage/SDWebImageSVGCoder",
     "rxswift": "ReactiveX/RxSwift",
+    "rxcocoa": "ReactiveX/RxSwift",
+    "rxrelay": "ReactiveX/RxSwift",
     "snapkit": "SnapKit/SnapKit",
     "lottie": "airbnb/lottie-ios",
     "realm": "realm/realm-swift",
+    "realmswift": "realm/realm-swift",
     "stripe": "stripe/stripe-ios",
+    "stripecore": "stripe/stripe-ios",
+    "stripepayments": "stripe/stripe-ios",
+    "stripepaymentsheet": "stripe/stripe-ios",
+    "stripepaymentsui": "stripe/stripe-ios",
+    "stripeuicore": "stripe/stripe-ios",
+    "stripeapplepay": "stripe/stripe-ios",
     "sentry": "getsentry/sentry-cocoa",
-    "firebase": "firebase/firebase-ios-sdk",
+    "sentryswiftui": "getsentry/sentry-cocoa",
+    "firebasecore": "firebase/firebase-ios-sdk",
+    "firebaseauth": "firebase/firebase-ios-sdk",
+    "firebasemessaging": "firebase/firebase-ios-sdk",
+    "firebasefirestore": "firebase/firebase-ios-sdk",
+    "firebasedatabase": "firebase/firebase-ios-sdk",
+    "firebasestorage": "firebase/firebase-ios-sdk",
+    "firebasecrashlytics": "firebase/firebase-ios-sdk",
+    "firebaseremoteconfig": "firebase/firebase-ios-sdk",
+    "firebaseinstallations": "firebase/firebase-ios-sdk",
+    "firebaseperformance": "firebase/firebase-ios-sdk",
+    "firebasefunctions": "firebase/firebase-ios-sdk",
+    "firebaseappcheck": "firebase/firebase-ios-sdk",
+    "firebasesessions": "firebase/firebase-ios-sdk",
+    "firebasecoreinternal": "firebase/firebase-ios-sdk",
     "googlesignin": "google/GoogleSignIn-iOS",
     "appauth": "openid/AppAuth-iOS",
     "grpc": "grpc/grpc-swift",
+    "grpc-swift": "grpc/grpc-swift",
+    "grpc-c++": "grpc/grpc",
+    "grpc-core": "grpc/grpc",
+    "grpcpp": "grpc/grpc",
     "trustkit": "datatheorem/TrustKit",
     "swiftyjson": "SwiftyJSON/SwiftyJSON",
     "starscream": "daltoniam/Starscream",
@@ -55,15 +90,21 @@ _SDK_REPOS = {
 }
 
 # Curated advisories for SDKs OSV doesn't cover (mainly CocoaPods). Each entry:
-# name -> [{id, summary, severity, fixed}]  — affected when version < `fixed`.
+# EXACT name -> [{id, summary, severity, fixed}]  — affected when version < `fixed`.
+# Applied only when the framework version is KNOWN (an unknown version is
+# reported as such, never assumed vulnerable).
 _CURATED = {
     "afnetworking": [
+        # TODO(verify): CVE-2015-1840 is the id used by the earlier analyzer for
+        # the AFNetworking 2.5.x "domain validation disabled by default"
+        # AFSecurityPolicy bug. Manually verify it against the AFNetworking
+        # advisory before publishing results: CVE-2015-3996 (AFNetworking before
+        # 2.5.3, SSL validation bypass) may be the intended one, and other ids
+        # in that range (CVE-2015-1840 is a Rails XSS id in NVD) may have been
+        # mis-copied.
         {"id": "CVE-2015-1840", "severity": "high", "fixed": "2.5.2",
          "summary": "SSL certificate domain validation disabled by default "
                     "(AFSecurityPolicy), enabling MITM."},
-        {"id": "CVE-2014-0000-afn", "severity": "high", "fixed": "2.5.3",
-         "summary": "SSL validation still bypassable via crafted cert chain; "
-                    "fixed in 2.5.3."},
     ],
     "gtmsessionfetcher": [
         {"id": "CVE-2018-16559", "severity": "medium", "fixed": "1.1.15",
@@ -100,26 +141,106 @@ def _vtuple(v: str) -> tuple:
     return tuple(parts) or (0,)
 
 
+def _norm_name(name: str) -> str:
+    return (name or "").lower().replace(".framework", "").replace(".xcframework", "").replace(" ", "")
+
+
 def _repo_for(name: str) -> str | None:
-    low = name.lower().replace(".framework", "").replace(" ", "")
-    for key, repo in _SDK_REPOS.items():
-        if key in low:
-            return repo
-    return None
+    """Exact-name mapping only (never by substring)."""
+    return _SDK_REPOS.get(_norm_name(name))
 
 
 def _curated_for(name: str, version: str) -> list[dict]:
-    low = name.lower().replace(".framework", "").replace(" ", "")
+    """Curated advisories for an exactly-named SDK at a KNOWN version. With no
+    version there is no basis for "affected": return nothing (the dependency is
+    reported as "version unknown" by enrich())."""
+    if not version:
+        return []
     out = []
-    for key, advs in _CURATED.items():
-        if key not in low:
-            continue
-        for a in advs:
-            if not version or _vtuple(version) < _vtuple(a["fixed"]):
-                out.append({"id": a["id"], "severity": a["severity"],
-                            "summary": a["summary"], "fixed": a["fixed"],
-                            "source": "curated"})
+    for a in _CURATED.get(_norm_name(name), []):
+        if _vtuple(version) < _vtuple(a["fixed"]):
+            out.append({"id": a["id"], "severity": a["severity"],
+                        "summary": a["summary"], "fixed": a["fixed"],
+                        "source": "curated"})
     return out
+
+
+# ---- CVSS ---------------------------------------------------------------
+
+_CVSS3_AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
+_CVSS3_AC = {"L": 0.77, "H": 0.44}
+_CVSS3_PR_U = {"N": 0.85, "L": 0.62, "H": 0.27}
+_CVSS3_PR_C = {"N": 0.85, "L": 0.68, "H": 0.5}
+_CVSS3_UI = {"N": 0.85, "R": 0.62}
+_CVSS3_CIA = {"H": 0.56, "L": 0.22, "N": 0.0}
+
+
+def _roundup(x: float) -> float:
+    """CVSS v3.1 Roundup (one decimal, away from zero, float-safe)."""
+    i = int(round(x * 100000))
+    if i % 10000 == 0:
+        return i / 100000.0
+    return (i // 10000 + 1) / 10.0
+
+
+def cvss3_base_score(vector: str) -> float | None:
+    """Base score from a CVSS v3.0/3.1 vector string, or None if unparsable."""
+    try:
+        parts = dict(p.split(":", 1) for p in str(vector).strip().split("/") if ":" in p)
+        scope_changed = parts["S"] == "C"
+        c, i, a = (_CVSS3_CIA[parts[k]] for k in ("C", "I", "A"))
+        iss = 1 - (1 - c) * (1 - i) * (1 - a)
+        if scope_changed:
+            impact = 7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15
+        else:
+            impact = 6.42 * iss
+        pr = (_CVSS3_PR_C if scope_changed else _CVSS3_PR_U)[parts["PR"]]
+        expl = 8.22 * _CVSS3_AV[parts["AV"]] * _CVSS3_AC[parts["AC"]] * pr * _CVSS3_UI[parts["UI"]]
+        if impact <= 0:
+            return 0.0
+        if scope_changed:
+            return _roundup(min(1.08 * (impact + expl), 10))
+        return _roundup(min(impact + expl, 10))
+    except (KeyError, ValueError, AttributeError):
+        return None
+
+
+def severity_from_score(score: float | None) -> str:
+    """CVSS qualitative rating: >=9 critical, >=7 high, >=4 medium, else low."""
+    if score is None:
+        return "unknown"
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low"
+
+
+def osv_severity(v: dict) -> str:
+    """Severity of one OSV vuln record from its CVSS score (v3 vector computed
+    locally, numeric scores taken as-is), falling back to the database's own
+    qualitative rating; "unknown" when neither is available. Never "any v3 =
+    high"."""
+    best: float | None = None
+    for s in v.get("severity") or []:
+        raw = str(s.get("score", ""))
+        score = None
+        if raw.upper().startswith("CVSS:3"):
+            score = cvss3_base_score(raw)
+        else:
+            try:
+                score = float(raw)
+            except ValueError:
+                score = None
+        if score is not None and (best is None or score > best):
+            best = score
+    if best is not None:
+        return severity_from_score(best)
+    qual = str((v.get("database_specific") or {}).get("severity", "")).lower()
+    return {"critical": "critical", "high": "high", "moderate": "medium",
+            "medium": "medium", "low": "low"}.get(qual, "unknown")
 
 
 def _osv_swift(repo: str, version: str, cache: dict) -> list[dict]:
@@ -132,21 +253,20 @@ def _osv_swift(repo: str, version: str, cache: dict) -> list[dict]:
         r = requests.post("https://api.osv.dev/v1/query", timeout=12,
                           json={"package": {"purl": f"pkg:swift/github.com/{repo}"},
                                 "version": version})
-        if r.ok:
-            for v in r.json().get("vulns", []):
-                sev = "medium"
-                for s in v.get("severity", []):
-                    if s.get("type") == "CVSS_V3":
-                        sev = "high"
-                fixed = ""
-                for aff in v.get("affected", []):
-                    for rng in aff.get("ranges", []):
-                        for ev in rng.get("events", []):
-                            if ev.get("fixed"):
-                                fixed = ev["fixed"]
-                vulns.append({"id": v.get("id", "?"), "severity": sev,
-                              "summary": (v.get("summary") or v.get("details") or "")[:200],
-                              "fixed": fixed, "source": "osv"})
+        if not r.ok:
+            # Non-2xx (throttled, outage): do NOT cache an empty answer as "no CVEs".
+            log.info("osv query for %s: HTTP %s (not cached)", purl, r.status_code)
+            return vulns
+        for v in r.json().get("vulns", []):
+            fixed = ""
+            for aff in v.get("affected", []):
+                for rng in aff.get("ranges", []):
+                    for ev in rng.get("events", []):
+                        if ev.get("fixed"):
+                            fixed = ev["fixed"]
+            vulns.append({"id": v.get("id", "?"), "severity": osv_severity(v),
+                          "summary": (v.get("summary") or v.get("details") or "")[:200],
+                          "fixed": fixed, "source": "osv"})
         cache[purl] = vulns
     except Exception as e:  # noqa: BLE001 — network/JSON; degrade gracefully
         log.info("osv query failed for %s: %s", purl, e)
@@ -223,7 +343,9 @@ def prevalence(db) -> dict:
 
 def enrich(deps: list[dict]) -> list[dict]:
     """Given [{name, version}], return the same list with a `cves` key added to
-    each (a list of {id, severity, summary, fixed, source})."""
+    each (a list of {id, severity, summary, fixed, source}) and a `cve_status`:
+    "version unknown" (no version: nothing was checked, nothing is assumed),
+    "unmapped" (no OSV repo / curated entry for this name), or "checked"."""
     cache = _load_cache()
     out = []
     for d in deps:
@@ -231,6 +353,12 @@ def enrich(deps: list[dict]) -> list[dict]:
         ver = d.get("version") or ""
         cves: list[dict] = []
         repo = _repo_for(name)
+        if not ver:
+            status = "version unknown"
+        elif repo is None and _norm_name(name) not in _CURATED:
+            status = "unmapped"
+        else:
+            status = "checked"
         if repo and ver and _osv_enabled():
             cves += _osv_swift(repo, ver, cache)
         cves += _curated_for(name, ver)
@@ -241,7 +369,7 @@ def enrich(deps: list[dict]) -> list[dict]:
                 continue
             seen.add(c["id"])
             uniq.append(c)
-        out.append({**d, "cves": uniq})
+        out.append({**d, "cves": uniq, "cve_status": status})
     _save_cache(cache)
     n = sum(len(x["cves"]) for x in out)
     if n:

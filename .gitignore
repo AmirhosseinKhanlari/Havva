@@ -32,3 +32,14 @@ tools/checksums.txt
 
 # vendored external MCP server (re-clone via git)
 tools/vphone-mcp/
+
+# DB backups (not matched by *.db) and exported UI design snapshots
+*.db.bak*
+design_export/
+
+# Foreign repositories vendored for reference (each has its own .git); re-clone, never embed
+mastg/
+docs/My-iOS-Pentesting-Cheatsheet/
+
+# Per-tweak build copies (the loadable copies live in the project root)
+tweaks/*/*.dylib
