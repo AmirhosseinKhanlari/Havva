@@ -92,6 +92,7 @@ class BackendBehavior(str, Enum):
     """Attestation differential-test result (coarse, kept for compatibility)."""
     FAIL_CLOSED = "fail_closed"      # refuses without valid attestation (real defense)
     FAIL_OPEN = "fail_open"          # serves anyway (adopted but not enforced)
+    SOFT_DEGRADED = "soft_degraded"  # detects and degrades the response (Apple-recommended soft enforcement)
     INCONCLUSIVE = "inconclusive"    # could not reach/observe gated action
 
 
@@ -103,6 +104,12 @@ class EnforcementVerdict(str, Enum):
     NOT_REGISTERED_OK = "not_registered_ok"      # served without ever registering a key
     DOWNGRADEABLE = "downgradeable"              # served via the unsupported-device fallback
     REPLAYABLE = "replayable"                    # an old assertion was accepted (counter unchecked)
+    UNBOUND_REQUEST = "unbound_request"          # a valid assertion was accepted for an altered request (clientDataHash not bound)
+    SOFT_DEGRADED = "soft_degraded"              # tampered probes got a DIFFERENT (limited) response: detected, degraded, not blocked
+    # Baseline-only outcomes (no probe needed): see attestation.classify_baseline
+    REFUSED_AT_ENROLLMENT = "refused_at_enrollment"  # T0: the re-signed client's attestation was rejected (provenance verified)
+    ASSERTION_UNUSED = "assertion_unused"        # T3: assertions produced but never sent with a data request
+    NOT_USED = "not_used"                        # App Attest never called during a logged-in drive
     PARTIAL_COVERAGE = "partial_coverage"        # some sensitive endpoints carry no assertion
     WEAK_OTHER = "weak_other"                    # some probe served, cause not pinned down
     INCONCLUSIVE = "inconclusive"                # never reached gated data even intact
@@ -119,6 +126,7 @@ class Flow:
     response_headers: dict[str, str] = field(default_factory=dict)
     request_body: str = ""
     response_body: str = ""
+    started: str = ""          # HAR startedDateTime (ISO 8601), for hook/request correlation
 
 
 @dataclass

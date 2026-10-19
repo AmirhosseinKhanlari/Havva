@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import gzip
 import json
+import re
 import time
 import zipfile
 import zlib
@@ -62,13 +63,29 @@ def _headers_to_dict(headers: list) -> dict[str, str]:
     return {h.get("name", "").lower(): h.get("value", "") for h in headers or []}
 
 
+_ADDR_TOKEN_RE = re.compile(r"[0-9A-Fa-f:.]+")
+
+
+def _client_matches(client: str, device_ip: str) -> bool:
+    """Exact address match: '192.168.1.17' must not accept '192.168.1.170'.
+    The HAR field may carry a port or brackets, so compare address tokens."""
+    for tok in _ADDR_TOKEN_RE.findall(client or ""):
+        if "." in tok and ":" in tok:          # IPv4:port
+            tok = tok.split(":", 1)[0]
+        if tok == device_ip:
+            return True
+    return False
+
+
 def har_to_flows(har: dict, device_ip: str = "") -> list[Flow]:
-    """Convert a parsed HAR into Flow objects, optionally filtered to the device."""
+    """Convert a parsed HAR into Flow objects, optionally filtered to the device.
+    Proxyman writes the client as `_clientAddress`; an entry that carries NO
+    client field is kept (unknown is not 'another client'), never judged by
+    its server address."""
     flows: list[Flow] = []
     for entry in har.get("log", {}).get("entries", []):
-        client = (entry.get("_clientAddress") or entry.get("clientAddress")
-                  or entry.get("serverIPAddress") or "")
-        if device_ip and client and device_ip not in client:
+        client = entry.get("_clientAddress") or entry.get("clientAddress") or ""
+        if device_ip and client and not _client_matches(client, device_ip):
             # Keep only device traffic when we know its IP.
             continue
         req = entry.get("request", {})
@@ -81,13 +98,31 @@ def har_to_flows(har: dict, device_ip: str = "") -> list[Flow]:
             response_headers=_headers_to_dict(resp.get("headers")),
             request_body=(req.get("postData", {}) or {}).get("text", "") or "",
             response_body=_decode_body(resp.get("content", {}) or {}),
+            started=str(entry.get("startedDateTime") or ""),
         ))
     return flows
 
 
-def app_hosts(flows: list[Flow], excluded: list[str] | None = None) -> set[str]:
-    """Non-excluded hosts the app actually reached (the oracle's comparison set)."""
-    return {f.host for f in flows if f.host and not is_excluded(f.host, excluded)}
+def _scheme(url: str) -> str:
+    try:
+        return (urlparse(url).scheme or "").lower()
+    except ValueError:
+        return ""
+
+
+def app_hosts(flows: list[Flow], excluded: list[str] | None = None,
+              schemes: tuple[str, ...] = ("https", "wss")) -> set[str]:
+    """Non-excluded TLS hosts the app actually reached (the oracle's comparison
+    set). Cleartext flows are excluded by default: a plain-HTTP beacon, an ATS
+    exception or an OCSP fetch says nothing about certificate pinning, so it
+    must not make an app 'not pinned'. See cleartext_hosts()."""
+    return {f.host for f in flows
+            if f.host and not is_excluded(f.host, excluded) and _scheme(f.url) in schemes}
+
+
+def cleartext_hosts(flows: list[Flow], excluded: list[str] | None = None) -> set[str]:
+    """Non-excluded hosts reached over plain HTTP (reported, never a pinning verdict)."""
+    return app_hosts(flows, excluded, schemes=("http", "ws"))
 
 
 def reached_any_network(flows: list[Flow], excluded: list[str] | None = None) -> bool:
@@ -95,6 +130,72 @@ def reached_any_network(flows: list[Flow], excluded: list[str] | None = None) ->
     traffic is always present on the device, so counting every host would make
     this trivially True and let a tamper exit masquerade as 'ran'."""
     return any(f.host and not is_excluded(f.host, excluded) for f in flows)
+
+
+# ---- Device-side TLS rejection signal (pure parsing) -----------------------
+# When an app rejects the proxy's certificate, nothing reaches the HAR (no
+# flow) and Proxyman's trace is just an early-closed upstream. The one place
+# the rejection IS recorded, with the process that did it, is the device
+# syslog: CFNetwork logs the task failure code and libboringssl logs the
+# handshake error, both under the app's process name. Codes:
+#   -1202  NSURLErrorServerCertificateUntrusted   (default handling rejected us)
+#   -1200  NSURLErrorSecureConnectionFailed        (TLS failed, e.g. fatal alert)
+#   -1012  NSURLErrorUserCancelledAuthentication   (challenge rejected)
+#    -999  NSURLErrorCancelled: what TrustKit / Alamofire / a delegate produce
+#          when they cancel the challenge on a pin mismatch, but also plain
+#          user navigation, so it is tallied separately as 'cancelled'.
+_SYSLOG_PROC_RE = re.compile(
+    r"^[A-Z][a-z]{2}\s+\d+\s+\d\d:\d\d:\d\d\s+\S+\s+([^\s\[(]+)(?:\(([^)]*)\))?\[\d+\]")
+_CF_CODE_RE = re.compile(r"error code:\s*(-\d+)")
+_NSERR_CODE_RE = re.compile(r"NSURLErrorDomain Code=(-\d+)")
+_FAIL_URL_RE = re.compile(r"NSErrorFailingURL(?:String)?Key=(https?://[^\s,}>]+)")
+_PRETEND_RE = re.compile(r"pretending to be [\u201c\"']([A-Za-z0-9.-]+)")
+_TLS_REJECT_CODES = frozenset({"-1202", "-1200", "-1012"})
+_CANCEL_CODES = frozenset({"-999"})
+_BORINGSSL_MARKERS = ("certificate_verify_failed", "certificate verify failed",
+                      "bad_certificate", "bad certificate", "unknown_ca", "unknown ca",
+                      "errsslxcertchaininvalid")
+
+
+def tls_rejections(syslog_text: str, process_names=None) -> dict:
+    """Tally TLS rejections in a syslog capture, attributed to `process_names`
+    (the app's CFBundleExecutable; no filter when empty). Returns
+      rejected  : lines with a definite certificate / handshake rejection
+      cancelled : -999 challenge cancellations (weak; pin libraries use it)
+      codes     : per-code counts
+      hosts     : hosts named in the error (often <private>-redacted on iOS)
+      samples   : up to 5 matching lines
+    Positive evidence only: zero rejections never proves 'not pinned'."""
+    procs = {p.lower() for p in (process_names or []) if p}
+    res = {"rejected": 0, "cancelled": 0, "codes": {}, "hosts": [], "samples": []}
+    hosts: set[str] = set()
+    for line in (syslog_text or "").splitlines():
+        m = _SYSLOG_PROC_RE.match(line)
+        if procs and (not m or m.group(1).lower() not in procs):
+            continue
+        low = line.lower()
+        cm = _CF_CODE_RE.search(line) or _NSERR_CODE_RE.search(line)
+        code = cm.group(1) if cm else None
+        is_reject = code in _TLS_REJECT_CODES or any(k in low for k in _BORINGSSL_MARKERS)
+        is_cancel = code in _CANCEL_CODES
+        if not (is_reject or is_cancel):
+            continue
+        key = code or "boringssl"
+        res["codes"][key] = res["codes"].get(key, 0) + 1
+        if is_reject:
+            res["rejected"] += 1
+        else:
+            res["cancelled"] += 1
+        hm = _FAIL_URL_RE.search(line) or _PRETEND_RE.search(line)
+        if hm:
+            val = hm.group(1)
+            h = host_from_url(val) if val.startswith("http") else val.lower()
+            if h and not is_excluded(h):
+                hosts.add(h)
+        if len(res["samples"]) < 5:
+            res["samples"].append(line.strip()[:200])
+    res["hosts"] = sorted(hosts)
+    return res
 
 
 # ---- Proxyman control (I/O) -------------------------------------------------

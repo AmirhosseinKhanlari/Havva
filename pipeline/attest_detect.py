@@ -27,6 +27,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from . import capture, device, instrument
 from .config import CONFIG
@@ -58,35 +59,88 @@ _ENT_APPATTEST = "com.apple.developer.devicecheck.appattest-environment"
 
 
 def _flow_attest_hits(f) -> list[str]:
-    """Where an attestation signal matched on a flow: the matching request header
-    name(s) (matched on the header NAME or its VALUE), and/or 'body' if the
-    request body carries the wording.
+    """Where an attestation signal matched on a flow: header name(s) and/or
+    'body', plus a 'cbor-assertion' / 'cbor-attestation' token when the CONTENT
+    fingerprint matched (independent of what the header is called). Shared
+    with the enforcement stage (attestation.assertion_evidence) so both stages
+    agree on what an attested request is."""
+    from .attestation import assertion_evidence
+    headers = f.request_headers
+    if headers and not isinstance(headers, dict):   # defensive: list of "name: value"
+        f.request_headers = {h.split(":", 1)[0].strip().lower(): (h.split(":", 1)[1] if ":" in h else "")
+                             for h in headers}
+    return assertion_evidence(f)
 
-    `request_headers` is a dict of lowercased header name -> value (see
-    capture.har_to_flows), so both halves are tested; a header such as
-    `authorization: AppCheck <token>` or `x-token-kind: attestation` is caught
-    even though its name is generic."""
-    hits: list[str] = []
-    headers = f.request_headers or {}
-    if isinstance(headers, dict):
-        items = headers.items()
-    else:  # defensive: a list of "name: value" strings
-        items = ((h.split(":", 1)[0].strip(), h.split(":", 1)[1] if ":" in h else "")
-                 for h in headers)
-    for name, value in items:
-        name = str(name or "")
-        value = value if isinstance(value, str) else str(value or "")
-        if _ASSERT_HEADER_RE.search(name) or _ASSERT_HEADER_RE.search(value[:4000]):
-            hits.append(name)
-    body = f.request_body or ""
-    if isinstance(body, bytes):
-        body = body.decode("utf-8", "replace")
-    if body and _ASSERT_HEADER_RE.search(body[:4000]):
-        hits.append("body")
+
+# ---- hook <-> request timing correlation --------------------------------------
+# The observer logs every App Attest call with the syslog timestamp; the HAR
+# carries each request's startedDateTime. A data request that leaves within a
+# few seconds AFTER generateAssertion / attestKey is the one carrying the
+# result, whatever the header is called. Second-granularity on the syslog side,
+# so the window is generous and the hit is labelled 'timing' (corroborating).
+_SYSLOG_TS_RE = re.compile(r"^([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d\d):(\d\d):(\d\d)")
+_MONTHS = {m: i for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+                                       "Sep", "Oct", "Nov", "Dec"), 1)}
+_TIMING_WINDOW = 5.0
+
+
+def _call_times(syslog_text: str, year: int | None = None) -> list[datetime]:
+    """Local naive timestamps of the App Attest / DeviceCheck CALL lines."""
+    out: list[datetime] = []
+    year = year or datetime.now().year
+    for line in (syslog_text or "").splitlines():
+        if "CALL DCAppAttestService" not in line and "CALL DCDevice" not in line:
+            continue
+        if "isSupported" in line:
+            continue
+        m = _SYSLOG_TS_RE.match(line)
+        if not m:
+            continue
+        try:
+            out.append(datetime(year, _MONTHS[m.group(1)], int(m.group(2)),
+                                int(m.group(3)), int(m.group(4)), int(m.group(5))))
+        except (KeyError, ValueError):
+            continue
+    return out
+
+
+def _flow_time(f) -> datetime | None:
+    s = getattr(f, "started", "") or ""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def _timing_hits(flows: list, calls: list[datetime], window: float = _TIMING_WINDOW) -> dict[int, float]:
+    """{flow index: seconds after the nearest preceding call} for non-excluded
+    requests that start within `window` seconds after a hook firing."""
+    hits: dict[int, float] = {}
+    if not calls:
+        return hits
+    for i, f in enumerate(flows):
+        if not f.host or capture.is_excluded(f.host):
+            continue
+        t = _flow_time(f)
+        if t is None:
+            continue
+        best = None
+        for c in calls:
+            d = (t - c).total_seconds()
+            if -1.0 <= d <= window and (best is None or d < best):
+                best = d
+        if best is not None:
+            hits[i] = max(best, 0.0)
     return hits
 
 
 _CALL_RE = re.compile(r"CALL (\S+) (\S+)")
+_SUPPORTED_RE = re.compile(r"CALL DCAppAttestService isSupported=(\d)")
 _VERIFIED_RE = re.compile(r"HOOK_VERIFIED (\S+)")
 _FAILED_RE = re.compile(r"HOOK_FAILED (\S+)")
 _PRESENT_RE = re.compile(r"CLASS_PRESENT (\S+)")
@@ -108,6 +162,7 @@ class Trail:
     failed: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)     # "Class selector" (App Attest AND DeviceCheck)
     launches: int = 0            # how many times the observer loaded (new PID = relaunch)
+    supported: bool | None = None  # what isSupported returned (None = never queried)
     crash_report: str = ""       # crash report matching the app, if any
     launch_failed: bool = False  # device.launch() returned no pid (denied/failed; NOT a crash)
 
@@ -158,7 +213,13 @@ def parse_trail(syslog_text: str) -> Trail:
     t.present = sorted(set(_PRESENT_RE.findall(txt)))
     t.verified = sorted(set(_VERIFIED_RE.findall(txt)))
     t.failed = sorted(set(_FAILED_RE.findall(txt)))
-    t.calls = sorted({f"{c} {s}" for c, s in _CALL_RE.findall(txt)})
+    # isSupported is a capability query every SDK makes at init: logged for
+    # the downgrade analysis, never counted as USAGE.
+    t.calls = sorted({f"{c} {s}" for c, s in _CALL_RE.findall(txt)
+                      if not s.startswith("isSupported")})
+    sup = _SUPPORTED_RE.findall(txt)
+    if sup:
+        t.supported = sup[-1] == "1"
     return t
 
 
@@ -231,21 +292,32 @@ def static_signals(appattest_flag, matched_patterns) -> tuple[bool, bool]:
     return entitlement, symbols
 
 
-def _endpoint_found(flows: list) -> str:
+def _endpoint_found(flows: list, syslog_text: str = "") -> str:
+    """Host of the first request that carries attestation evidence (content
+    fingerprint, wording, or a request that left right after a hook fired)."""
     for f in flows:
         if f.host and not capture.is_excluded(f.host) and _flow_attest_hits(f):
+            return f.host
+    timing = _timing_hits(flows, _call_times(syslog_text)) if syslog_text else {}
+    for i in sorted(timing):
+        f = flows[i]
+        if 200 <= f.status < 300 and getattr(f, "method", "").upper() in ("POST", "PUT", "PATCH"):
             return f.host
     return ""
 
 
-def _attest_requests(flows: list) -> list[dict]:
-    """Every captured request that carries an attestation-looking signal (header
-    or body), with details for the UI table. `signal` names where it matched."""
+def _attest_requests(flows: list, syslog_text: str = "") -> list[dict]:
+    """Every captured request that carries an attestation-looking signal (header,
+    body, content fingerprint, or hook timing), for the UI table. `signal` names
+    where it matched."""
     out: list[dict] = []
-    for f in flows:
+    timing = _timing_hits(flows, _call_times(syslog_text)) if syslog_text else {}
+    for i, f in enumerate(flows):
         if not f.host or capture.is_excluded(f.host):
             continue
         hits = _flow_attest_hits(f)
+        if i in timing:
+            hits = hits + [f"timing(+{timing[i]:.0f}s)"]
         if not hits:
             continue
         out.append({
@@ -253,7 +325,7 @@ def _attest_requests(flows: list) -> list[dict]:
             "method": getattr(f, "method", "") or "",
             "url": (f.url or "")[:200],
             "status": f.status,
-            "signal": ", ".join(sorted(set(hits))[:4]),
+            "signal": ", ".join(sorted(set(hits))[:5]),
         })
         if len(out) >= 50:
             break
@@ -374,7 +446,7 @@ def observe(app_id: str, bundle_id: str, decrypted: str,
     if not manual:
         device.uninstall(bundle_id)  # manual mode keeps the app installed
 
-    return trail, _endpoint_found(flows), _attest_requests(flows)
+    return trail, _endpoint_found(flows, syslog), _attest_requests(flows, syslog)
 
 
 def process_app(db: Database, row, accounts: dict, manual: bool = False,
@@ -466,6 +538,7 @@ def _save(db: Database, app_id: str, conf: AttestConfidence, trail: Trail, endpo
                              "verified": trail.verified,
                              "failed": trail.failed, "calls": trail.calls,
                              "launches": trail.launches, "crashed": trail.crashed,
+                             "supported": trail.supported,
                              "launch_failed": trail.launch_failed,
                              "hooks_armed": trail.hooks_armed,
                              "reliable": trail.tooling_ok,

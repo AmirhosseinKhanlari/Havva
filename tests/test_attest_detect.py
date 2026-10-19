@@ -180,7 +180,7 @@ def test_endpoint_found_by_assertion_header():
         Flow(url="https://gsp.apple.com/x", method="GET", status=200,
              host="gsp.apple.com", request_headers={"x-app-attest": "z"}),
         Flow(url="https://api.example.com/e", method="POST", status=200,
-             host="api.example.com", request_headers={"x-attestation": "blob"}),
+             host="api.example.com", request_headers={"x-attestation": "blob-blob-blob-blob-blob"}),
     ]
     assert _endpoint_found(flows) == "api.example.com"
 
@@ -221,7 +221,7 @@ def test_client_assertion_oauth_body_is_not_attestation():
 def test_attest_requests_signal_names_header_and_body():
     f = Flow(url="https://api.example.com/attest", method="POST", status=200,
              host="api.example.com",
-             request_headers={"x-attestation": "blob", "accept": "*/*"},
+             request_headers={"x-attestation": "blob-blob-blob-blob-blob", "accept": "*/*"},
              request_body='{"attestationObject":"..."}')
     reqs = _attest_requests([f])
     assert len(reqs) == 1

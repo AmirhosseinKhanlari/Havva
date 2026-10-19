@@ -83,3 +83,25 @@ def test_inconclusive_when_app_never_touched_network():
         any_config_ran=True, reached_any_network=False,
     ))
     assert r.label is Outcome.INCONCLUSIVE
+
+
+
+def test_crashed_baseline_cannot_credit_a_bypass():
+    r = decide(OracleInput(stage0_app_hosts=set(), stage0_crashed=True,
+                           per_config_hosts=[(BypassStage.DYLIB, {"api.example.com"})],
+                           any_config_ran=True, reached_any_network=True))
+    assert r.label is Outcome.INCONCLUSIVE and not r.pinned
+
+
+def test_baseline_rejection_with_open_hosts_and_nothing_revealed_is_pinned_unbypassed():
+    r = decide(OracleInput(stage0_app_hosts={"cdn.example.com"}, baseline_tls_rejected=True,
+                           per_config_hosts=[(BypassStage.DYLIB, {"cdn.example.com"})],
+                           any_config_ran=True, reached_any_network=True))
+    assert r.label is Outcome.PINNED_UNBYPASSED and r.pinned
+
+
+def test_baseline_rejection_counts_as_a_network_attempt():
+    r = decide(OracleInput(stage0_app_hosts=set(), baseline_tls_rejected=True,
+                           per_config_hosts=[(BypassStage.DYLIB, set())],
+                           any_config_ran=True, reached_any_network=False))
+    assert r.label is Outcome.PINNED_UNBYPASSED

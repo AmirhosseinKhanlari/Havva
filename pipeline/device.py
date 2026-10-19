@@ -305,18 +305,45 @@ def terminate(pid: int, bundle_id: str = "") -> None:
              "--device", _udid(), "--pid", str(pid)], timeout=60, env=_xcrun_env())
 
 
-def pull_container(bundle_id: str, remote: str, local: "str | Path") -> bool:
+def pull_container_ex(bundle_id: str, remote: str, local: "str | Path") -> tuple[bool, str]:
     """Pull `remote` (a path inside the app's data container) to `local` via
     house_arrest/AFC. Works over plain lockdown (no tunnel). Full-container
-    access needs a dev-signed (get-task-allow) app; ad-hoc vends Documents only."""
+    access needs a dev-signed (get-task-allow) app; ad-hoc vends Documents only.
+    Returns (got_files, reason): the reason names WHY nothing came back
+    (tool missing, device locked, app not installed, signing) so the verdict
+    does not blame signing for every failure. Only regular FILES count: a
+    pull that creates empty directories has pulled nothing."""
     if not pmd3_available():
-        return False
+        return False, "pymobiledevice3 not available"
     local = Path(local)
     local.mkdir(parents=True, exist_ok=True)
-    before = sum(1 for _ in local.rglob("*"))
-    run_cmd([_pmd3(), "apps", "pull", bundle_id, remote, str(local), "--udid", _udid()],
-            timeout=180, env=_xcrun_env())
-    return sum(1 for _ in local.rglob("*")) > before
+    before = sum(1 for f in local.rglob("*") if f.is_file())
+    p = run_cmd([_pmd3(), "apps", "pull", bundle_id, remote, str(local), "--udid", _udid()],
+                timeout=180, env=_xcrun_env())
+    got = sum(1 for f in local.rglob("*") if f.is_file()) > before
+    if got:
+        return True, ""
+    err = ((p.stderr or "") + (p.stdout or "")).strip()
+    low = err.lower()
+    if "passwordprotected" in low or "device is locked" in low or "locked" in low:
+        reason = "device is locked (unlock it and re-run)"
+    elif "installationlookupfailed" in low or "not installed" in low:
+        reason = "app not installed when the pull ran"
+    elif "vendcontainer" in low or "house_arrest" in low or "permission" in low or "denied" in low:
+        reason = ("container not vended (needs Development signing / get-task-allow; "
+                  "ad-hoc only vends Documents)")
+    elif p.returncode == 124:
+        reason = "pull timed out"
+    elif err:
+        reason = "pull failed: " + err[-160:]
+    else:
+        reason = "nothing in that container path"
+    return False, reason
+
+
+def pull_container(bundle_id: str, remote: str, local: "str | Path") -> bool:
+    """Boolean wrapper over pull_container_ex (kept for callers that only need yes/no)."""
+    return pull_container_ex(bundle_id, remote, local)[0]
 
 
 def _installed_exe_name(bundle_id: str) -> str:
@@ -428,6 +455,11 @@ def _watch_liveness(bundle_id: str, duration: float, grace: int = 8, poll: int =
             misses = 0
         time.sleep(poll)
     return False
+
+
+def watch_liveness(bundle_id: str, duration: float, stop_check=None) -> bool:
+    """Public wrapper over _watch_liveness: True if the app exited on its own."""
+    return _watch_liveness(bundle_id, duration, stop_check=stop_check)
 
 
 def capture_syslog(seconds: int | None = None, during=None, grep: str = "OBSERVER",

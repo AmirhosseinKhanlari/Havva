@@ -93,6 +93,17 @@ def config_specs(config: str) -> list[DylibSpec]:
         return [DylibSpec(d.ssks, d.ssks_alias, "weak"),
                 DylibSpec("EvasionKit.dylib", "libSystemBridge.dylib", "weak"),
                 sideloadfix]
+    if config == "attest_probe":
+        # Enforcement probes: Frida gadget for the hooks PLUS SSL Kill Switch,
+        # otherwise a pinned app's gated endpoints never reach the proxy and
+        # every probe is inconclusive.
+        # AttestObserver rides along so the BASELINE drive records which App
+        # Attest calls happened (enrollment vs assertion), which the tier
+        # classification needs before any probe script is armed.
+        return [DylibSpec(d.frida_gadget, d.frida_alias, "strong", config_listen=True),
+                DylibSpec(d.ssks, d.ssks_alias, "weak"),
+                DylibSpec("AttestObserver.dylib", "libServiceBridge.dylib", "weak"),
+                sideloadfix]
     if config == "attest_observe":
         # See traffic (pinning bypassed) + observe App Attest API calls.
         return [DylibSpec(d.ssks, d.ssks_alias, "weak"),
@@ -101,20 +112,29 @@ def config_specs(config: str) -> list[DylibSpec]:
     raise ValueError(f"unknown config: {config}")
 
 
-def bundle_id_from_ipa(ipa_path: str | Path) -> str:
-    """Read CFBundleIdentifier from an IPA's Payload/<App>.app/Info.plist.
-    Used to recover a bundle id the corpus DB never captured (else we would
-    try to launch a null bundle id and fail on both signing paths)."""
+def _info_plist_from_ipa(ipa_path: str | Path) -> dict:
     try:
         with zipfile.ZipFile(ipa_path) as z:
             infos = [n for n in z.namelist()
                      if n.startswith("Payload/") and n.endswith(".app/Info.plist")]
             if not infos:
-                return ""
-            info = plistlib.loads(z.read(sorted(infos, key=len)[0]))
-            return info.get("CFBundleIdentifier", "") or ""
-    except (zipfile.BadZipFile, OSError, plistlib.InvalidFileException, KeyError):
-        return ""
+                return {}
+            return plistlib.loads(z.read(sorted(infos, key=len)[0])) or {}
+    except (zipfile.BadZipFile, OSError, plistlib.InvalidFileException, KeyError, ValueError):
+        return {}
+
+
+def bundle_id_from_ipa(ipa_path: str | Path) -> str:
+    """Read CFBundleIdentifier from an IPA's Payload/<App>.app/Info.plist.
+    Used to recover a bundle id the corpus DB never captured (else we would
+    try to launch a null bundle id and fail on both signing paths)."""
+    return _info_plist_from_ipa(ipa_path).get("CFBundleIdentifier", "") or ""
+
+
+def executable_name_from_ipa(ipa_path: str | Path) -> str:
+    """CFBundleExecutable: the process name the device syslog attributes the
+    app's CFNetwork / boringssl lines to."""
+    return _info_plist_from_ipa(ipa_path).get("CFBundleExecutable", "") or ""
 
 
 def dylib_catalog() -> list[dict]:
@@ -133,6 +153,9 @@ def dylib_catalog() -> list[dict]:
          "source": "EvasionKit.dylib", "alias": "libSystemBridge.dylib", "load": "weak", "default": False},
         {"id": "attest", "label": "AttestObserver", "desc": "Logs App Attest / DeviceCheck API calls",
          "source": "AttestObserver.dylib", "alias": "libServiceBridge.dylib", "load": "weak", "default": False},
+        {"id": "storageobs", "label": "StorageObserver",
+         "desc": "Logs each container file's Data Protection class and the app's Keychain items (accessibility only, never values)",
+         "source": "StorageObserver.dylib", "alias": "libDataBridge.dylib", "load": "weak", "default": False},
         {"id": "entshim", "label": "EntitlementShim",
          "desc": "Swallows re-sign entitlement-loss crashes (e.g. TV-provider SSO) so they aren't misread as tamper detection",
          "source": "EntitlementShim.dylib", "alias": "libAccountBridge.dylib", "load": "weak", "default": False},

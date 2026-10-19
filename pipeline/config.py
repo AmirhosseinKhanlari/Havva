@@ -302,7 +302,9 @@ class Runtime:
     monitor_seconds: int = field(default_factory=lambda: int(_env("MONITOR_SECONDS", "45")))
     # Hosts never intercepted (Apple infra), extended at runtime.
     excluded_hosts: list[str] = field(default_factory=lambda: _env_list(
-        "EXCLUDED_HOSTS", ["apple.com", "icloud.com", "itunes.apple.com", "mzstatic.com"]))
+        "EXCLUDED_HOSTS", ["apple.com", "icloud.com", "itunes.apple.com", "mzstatic.com",
+                           "cdn-apple.com", "aaplimg.com", "apple-dns.net",
+                           "apple-cloudkit.com", "apple-mapkit.com"]))
 
 
 # Acquisition mode: "ipadecrypt" (ipadecrypt downloads + decrypts, supports

@@ -13,7 +13,9 @@ dynamic stage is ground truth). That is intentional and reported as such.
 from __future__ import annotations
 
 import plistlib
+import re
 import zipfile
+from datetime import date, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,10 +59,11 @@ PIN_PLUGINS: dict[str, list[str]] = {
                 "SSLCertificateChecker"],
     "ReactNativeSSLPinning": ["react-native-ssl-pinning", "RNSslPinning"],
     "Approov": ["ApproovService", "_Approov", "approov"],
-    "DataDome": ["DataDomeSDK"],
-    # Braintree pins its own gateway with certs compiled into the SDK.
+    # Braintree pins its own gateway with certs compiled into the SDK: the APP's
+    # backend is not pinned by it. Recorded as matched["pin_scope"]=sdk-gateway.
     "Braintree": ["BTAPIPinnedCertificates"],
 }
+PIN_PLUGIN_SCOPE = {"Braintree": "sdk-gateway"}
 # Hand-rolled pinned material in the main binary; only counted when no general
 # TLS library (which carries these property names itself) explains them.
 PIN_GENERIC_MATERIAL = ["pinnedCertificates", "pinnedPublicKeys",
@@ -71,23 +74,78 @@ PIN_LIBRARIES = {**TLS_LIBRARIES, **PIN_PLUGINS, "generic-pinned-material": PIN_
 
 CERT_FILE_EXTS = (".cer", ".der", ".crt", ".pem", ".p12", ".pfx", ".cert", ".pub", ".key")
 
-PIN_NATIVE = [
-    "SecTrustEvaluateWithError", "SecTrustEvaluate", "SecTrustCopyPublicKey",
-    "SecTrustSetPolicies", "SecTrustSetAnchorCertificates", "SecPolicyCreateSSL",
-    "SecCertificateCopyData", "SecKeyCopyExternalRepresentation",
+# Hand-rolled pinning on the Security framework. STRONG tokens pull the served
+# chain / key out of the trust object to compare it against pinned material,
+# which is what pinning IS. WEAK tokens are the ordinary trust-evaluation calls
+# every TLS client (and every networking SDK) makes; they only corroborate. A
+# custom BoringSSL verifier is weak for the same reason: a bundled BoringSSL
+# (Flutter, gRPC/Firestore) installs one for its DEFAULT validation, and the
+# bare word "boringssl" is in every such binary, so it is not a marker at all.
+PIN_NATIVE_STRONG = [
+    "SecTrustCopyPublicKey", "SecTrustCopyKey", "SecCertificateCopyData",
+    "SecKeyCopyExternalRepresentation", "SecTrustCopyCertificateChain",
+    "SecTrustGetCertificateAtIndex", "SecTrustSetAnchorCertificates",
+    "SecTrustSetAnchorCertificatesOnly",
 ]
-PIN_DELEGATE = [
+PIN_NATIVE_WEAK = [
+    "SecTrustEvaluateWithError", "SecTrustEvaluate", "SecTrustEvaluateAsync",
+    "SecTrustEvaluateAsyncWithError", "SecTrustEvaluateFastAsync",
+    "SecTrustSetPolicies", "SecPolicyCreateSSL",
+    "SSL_set_custom_verify", "SSL_CTX_set_custom_verify",
+]
+PIN_NATIVE = PIN_NATIVE_STRONG + PIN_NATIVE_WEAK      # compatibility alias
+PIN_BORINGSSL = ["SSL_set_custom_verify", "SSL_CTX_set_custom_verify"]  # alias (weak)
+
+# Challenge delegate that inspects the server trust. The selector half is
+# matched as a substring (long, unambiguous, survives Swift mangling); the
+# trust half must be a bounded token so `NSURLAuthenticationMethodServerTrust`
+# does not also count as `serverTrust`.
+PIN_DELEGATE_CHALLENGE = [
     "URLSession:didReceiveChallenge:completionHandler:",
+    "URLSession:task:didReceiveChallenge:completionHandler:",
     "connection:willSendRequestForAuthenticationChallenge:",
-    "NSURLAuthenticationMethodServerTrust", "serverTrust",
+    "didReceiveChallenge", "URLAuthenticationChallenge",
 ]
-PIN_BORINGSSL = ["SSL_set_custom_verify", "SSL_CTX_set_custom_verify", "boringssl"]
+PIN_DELEGATE_TRUST = ["NSURLAuthenticationMethodServerTrust", "serverTrust"]
+PIN_DELEGATE = PIN_DELEGATE_CHALLENGE + PIN_DELEGATE_TRUST
+
+# Pinned material: a base64 SHA-256 (43 chars + '='), the SPKI-hash form that
+# TrustKit, HPKP and OkHttp-style pins use. Corroboration only: keys and other
+# digests look identical, so it never flags on its own.
+# '/' is allowed before the hash: TrustKit / HPKP write pins as "sha256/<b64>".
+_SPKI_RE = re.compile(r"(?<![A-Za-z0-9+=])[A-Za-z0-9+/]{43}=(?![A-Za-z0-9+/=])")
+
+# TrustKit reads its pins from Info.plist (TSKConfiguration) unless configured
+# in code. Per domain: TSKEnforcePinning (default YES; NO = report-only) and
+# TSKExpirationDate (YYYY-MM-DD; past = pinning disabled).
+TSK_CONFIG_KEY = "TSKConfiguration"
 
 TLS_STACK_MARKERS: dict[TlsStack, list[str]] = {
     TlsStack.FLUTTER: ["Flutter.framework", "libflutter", "io.flutter", "flutter_assets"],
     TlsStack.REACT_NATIVE: ["RCTBridge", "libhermes", "React.framework", "jsi::"],
     TlsStack.XAMARIN: ["libmonosgen", "Xamarin", "Mono.framework", "libxamarin"],
     TlsStack.CORDOVA: ["Cordova", "CDVViewController", "Capacitor"],
+}
+
+# Attestation / anti-fraud SDKs that call App Attest or DeviceCheck on the
+# app's behalf. Adoption through an SDK is a different population from direct
+# adoption (the SDK vendor's backend verifies, the app's backend trusts a token).
+ATTEST_SDK_MARKERS: dict[str, list[str]] = {
+    "FirebaseAppCheck": ["FIRAppCheck", "AppCheckCore", "FirebaseAppCheck"],
+    "Approov": ["ApproovService", "approov.io"],
+    "reCAPTCHAEnterprise": ["RecaptchaEnterprise", "RecaptchaClient"],
+    "ArkoseLabs": ["ArkoseLabs", "ArkoseKit"],
+    "HUMAN": ["HUMANSecurity", "PerimeterX", "PXManager"],
+    "FingerprintPro": ["FingerprintPro", "FingerprintJS"],
+    "DataDome": ["DataDomeSDK"],
+    "Kasada": ["KasadaSDK", "KPSDK"],
+}
+# Which App Check provider the app wires: AppAttest / DeviceCheck / Debug. A
+# debug provider in a shipping binary is a finding in itself.
+APPCHECK_PROVIDER_MARKERS: dict[str, list[str]] = {
+    "app-attest": ["FIRAppAttestProvider", "AppAttestProvider"],
+    "device-check": ["FIRDeviceCheckProvider", "DeviceCheckProvider"],
+    "debug": ["FIRAppCheckDebugProvider", "AppCheckDebugProvider"],
 }
 
 APPATTEST_MARKERS = ["DCAppAttestService", "attestKeyWithClientDataHash",
@@ -139,32 +197,86 @@ class ExtractedApp:
         return self.haystack
 
 
-def _find_all(haystack: str, patterns: list[str]) -> list[str]:
-    low = haystack.lower()
+def _find_all(haystack: str, patterns: list[str], *, lowered: bool = False) -> list[str]:
+    """Case-insensitive substring presence. Pass `lowered=True` when `haystack`
+    is already lower-cased (classify() lowers its multi-hundred-MB corpora once
+    instead of once per pattern list)."""
+    low = haystack if lowered else haystack.lower()
     return [p for p in patterns if p.lower() in low]
+
+
+def _find_bounded(haystack: str, patterns: list[str], *, lowered: bool = False) -> list[str]:
+    """Like _find_all, but an occurrence must not be glued to a LETTER on either
+    side, so `SecTrustEvaluate` is not credited for `SecTrustEvaluateWithError`
+    and `serverTrust` not for `NSURLAuthenticationMethodServerTrust`. Digits,
+    '_' and '$' remain legal neighbours: nm prints `_SecTrustEvaluate`, ObjC
+    class symbols are `_OBJC_CLASS_$_X`, Swift mangling length-prefixes names."""
+    low = haystack if lowered else haystack.lower()
+    out: list[str] = []
+    for p in patterns:
+        rx = re.compile(r"(?<![a-z])" + re.escape(p.lower()) + r"(?![a-z])")
+        if rx.search(low):
+            out.append(p)
+    return out
+
+
+def trustkit_config(info_plist: dict, today: "date | None" = None) -> dict | None:
+    """Parse TrustKit's Info.plist configuration. None when TrustKit is configured
+    in code (nothing to read). Otherwise the per-domain enforcement split."""
+    cfg = (info_plist or {}).get(TSK_CONFIG_KEY)
+    if not isinstance(cfg, dict):
+        return None
+    today = today or date.today()
+    doms = cfg.get("TSKPinnedDomains") or {}
+    out = {"domains": [], "enforced": [], "report_only": [], "expired": [],
+           "swizzle": bool(cfg.get("TSKSwizzleNetworkDelegates", False))}
+    for d, c in sorted(doms.items()):
+        c = c if isinstance(c, dict) else {}
+        out["domains"].append(d)
+        enforce = c.get("TSKEnforcePinning", True)
+        exp = c.get("TSKExpirationDate")
+        expired = False
+        if isinstance(exp, datetime):
+            expired = exp.date() < today
+        elif isinstance(exp, date):
+            expired = exp < today
+        elif isinstance(exp, str):
+            try:
+                expired = date.fromisoformat(exp[:10]) < today
+            except ValueError:
+                pass
+        if expired:
+            out["expired"].append(d)
+        elif enforce is False or str(enforce).lower() in ("0", "false", "no"):
+            out["report_only"].append(d)
+        else:
+            out["enforced"].append(d)
+    return out
 
 
 def classify(app: ExtractedApp) -> DefenseProfile:
     """Pure classification from an extracted corpus. Unit-tested."""
     hay = app.haystack
+    hay_l = hay.lower()
+    main_hay = app.main_haystack
+    main_l = main_hay.lower() if main_hay is not hay else hay_l
     matched: dict[str, list[str]] = {}
     prof = DefenseProfile()
 
     # --- TLS stack ---
     prof.tls_stack = TlsStack.NATIVE
-    fw_hay = "\n".join(app.frameworks) + "\n" + hay
+    fw_l = "\n".join(app.frameworks).lower() + "\n" + hay_l
     for stack, markers in TLS_STACK_MARKERS.items():
-        hits = _find_all(fw_hay, markers)
+        hits = _find_all(fw_l, markers, lowered=True)
         if hits:
             prof.tls_stack = stack
             matched[f"tls:{stack.value}"] = hits
             break
 
     # --- TLS libraries PRESENT (informational, never pinning by itself) ---
-    main_hay = app.main_haystack
     tls_libs: list[str] = []
     for lib, markers in TLS_LIBRARIES.items():
-        hits = _find_all(hay, markers)
+        hits = _find_all(hay_l, markers, lowered=True)
         if hits:
             tls_libs.append(lib)
             matched[f"tlslib:{lib}"] = hits
@@ -181,8 +293,25 @@ def classify(app: ExtractedApp) -> DefenseProfile:
         pin_lib = "TrustKit"
         layer_detail = "l3_library_trustkit"
         matched["pinlib:TrustKit"] = matched["tlslib:TrustKit"]
+        # Presence says adopted; the plist says whether it ENFORCES. Report-only
+        # or expired pins are the adopted-not-enforced case the paper wants.
+        tk = trustkit_config(app.info_plist)
+        if tk is None:
+            hint = "unknown"                       # configured in code
+        elif tk["enforced"] and not (tk["report_only"] or tk["expired"]):
+            hint = "all"
+        elif tk["enforced"]:
+            hint = "partial"
+        else:
+            hint = "none"
+            layer_detail = "l3_library_trustkit_report_only"
+        matched["trustkit_enforce"] = [hint]
+        if tk:
+            matched["trustkit_config"] = [
+                f"{d}: {'enforced' if d in tk['enforced'] else 'report-only' if d in tk['report_only'] else 'expired'}"
+                for d in tk["domains"]][:8]
     if not pin_lib and "Alamofire" in tls_libs:
-        cfg = _find_all(main_hay, PIN_CONFIG_ALAMOFIRE)
+        cfg = _find_all(main_l, PIN_CONFIG_ALAMOFIRE, lowered=True)
         # Dynamically linked (Alamofire.framework shipped): an evaluator name in
         # the MAIN binary is a reference the app itself makes -> configured.
         # Statically linked: the library's evaluator classes land in the main
@@ -198,59 +327,89 @@ def classify(app: ExtractedApp) -> DefenseProfile:
         elif cfg:
             matched["pinlib_candidate:Alamofire"] = cfg + ["static-link, no bundled certs"]
     if not pin_lib and "AFNetworking" in tls_libs:
-        cfg = _find_all(main_hay, PIN_CONFIG_AFNETWORKING)
-        setter = _find_all(main_hay, PIN_CONFIG_AFNETWORKING_SETTER)
+        cfg = _find_all(main_l, PIN_CONFIG_AFNETWORKING, lowered=True)
+        setter = _find_all(main_l, PIN_CONFIG_AFNETWORKING_SETTER, lowered=True)
         if cfg or (setter and app.cert_files):
             pin_lib = "AFNetworking"
             matched["pinlib:AFNetworking"] = cfg + setter + (
                 [f"cert:{c}" for c in app.cert_files[:4]] if setter else [])
     if not pin_lib:
         for lib, markers in PIN_PLUGINS.items():
-            hits = _find_all(hay, markers)
+            hits = _find_all(hay_l, markers, lowered=True)
             if hits:
                 pin_lib = lib
                 matched[f"pinlib:{lib}"] = hits
+                if lib in PIN_PLUGIN_SCOPE:
+                    matched["pin_scope"] = [PIN_PLUGIN_SCOPE[lib]]
                 break
     if not pin_lib and not ({"Alamofire", "AFNetworking"} & set(tls_libs)):
-        hits = _find_all(main_hay, PIN_GENERIC_MATERIAL)
+        hits = _find_all(main_l, PIN_GENERIC_MATERIAL, lowered=True)
         if hits:
             pin_lib = "generic-pinned-material"
             matched["pinlib:generic-pinned-material"] = hits
     if pin_lib:
         matched["pin_layer_detail"] = [layer_detail or f"l3_library_{pin_lib.lower()}"]
 
-    native_hits = _find_all(hay, PIN_NATIVE)
-    boring_hits = _find_all(hay, PIN_BORINGSSL)
-    delegate_hits = _find_all(hay, PIN_DELEGATE)
+    # Pinned material in the MAIN binary / bundle: what a hand-rolled pin
+    # compares against. Corroborates the weak layers below.
+    spki = sorted(set(_SPKI_RE.findall(app.main_strings or app.strings or "")))
+    material = bool(app.cert_files) or bool(spki)
+    if spki:
+        matched["spki_hashes"] = spki[:4]
 
-    # ATS NSPinnedDomains (iOS 14+ declarative pinning) in Info.plist.
+    # L4: hand-rolled Security.framework pinning, judged on the MAIN binary: a
+    # strong (chain / key extraction) token plus either a second native token
+    # or pinned material. Strong tokens only in frameworks are a candidate, not
+    # a flag (every TLS SDK imports the weak tokens; an SDK that pins its own
+    # gateway is not the app pinning its backend).
+    strong_main = _find_bounded(main_l, PIN_NATIVE_STRONG, lowered=True)
+    weak_main = _find_bounded(main_l, PIN_NATIVE_WEAK, lowered=True)
+    native_main = strong_main + weak_main
+    native_pins = bool(strong_main) and (len(native_main) >= 2 or material)
+    if not native_pins and not strong_main:
+        strong_fw = _find_bounded(hay_l, PIN_NATIVE_STRONG, lowered=True)
+        if strong_fw:
+            matched["pin_candidate:native_framework"] = strong_fw
+
+    # L2: a challenge delegate that inspects the server trust. The pair alone is
+    # also how an app forwards to default handling or does client certificates,
+    # so it only counts with pinned material or a strong native token.
+    challenge = _find_all(main_l, PIN_DELEGATE_CHALLENGE, lowered=True)
+    trust = _find_bounded(main_l, PIN_DELEGATE_TRUST, lowered=True)
+    delegate_pair = bool(challenge) and bool(trust)
+    delegate_pins = delegate_pair and (material or bool(strong_main))
+
+    # L1: ATS NSPinnedDomains (iOS 14+ declarative, OS-enforced). Ranked above
+    # the hand-rolled layers: it is exact and enforced by the OS, not inferred.
     ats = app.info_plist.get("NSAppTransportSecurity", {}) or {}
-    ats_pinned = "NSPinnedDomains" in ats
+    pinned_domains = ats.get("NSPinnedDomains") or {}
+    ats_pinned = isinstance(pinned_domains, dict) and bool(pinned_domains)
 
     if pin_lib:
         prof.pins_flag = True
         prof.pin_layer = PinLayer.L3_LIBRARY
         prof.pin_library = pin_lib
-    elif len(native_hits) >= 2 or boring_hits:
-        prof.pins_flag = True
-        prof.pin_layer = PinLayer.L4_SECTRUST
-        matched["pin:native"] = native_hits + boring_hits
     elif ats_pinned:
         prof.pins_flag = True
         prof.pin_layer = PinLayer.L1_ATS
-        matched["pin:ats"] = ["NSPinnedDomains"]
-    elif len(delegate_hits) >= 2:
-        # Delegate challenge handling alone is weak evidence; needs the trust
-        # method plus the challenge selector to count.
+        matched["pin:ats"] = sorted(str(d) for d in pinned_domains)[:8]
+    elif native_pins:
+        prof.pins_flag = True
+        prof.pin_layer = PinLayer.L4_SECTRUST
+        matched["pin:native"] = native_main + (
+            [f"cert:{c}" for c in app.cert_files[:2]] if len(native_main) < 2 and app.cert_files else [])
+    elif delegate_pins:
         prof.pins_flag = True
         prof.pin_layer = PinLayer.L2_DELEGATE
-        matched["pin:delegate"] = delegate_hits
+        matched["pin:delegate"] = challenge + trust
+    elif delegate_pair:
+        matched["pin_candidate:delegate"] = challenge + trust
 
     # --- App Attest / DeviceCheck (graded adoption) ---
     # Level grades how strongly the app adopts App Attest, since mere API presence
     # is a soft signal (could be dead code): the entitlement means it is actually
     # provisioned for App Attest, and a 'production' environment means it ships it.
-    aa = _find_all(hay, APPATTEST_MARKERS)
+    aa = _find_all(hay_l, lowered=True, patterns=APPATTEST_MARKERS)
     ent_val = app.entitlements.get(ENT_APPATTEST)
     if aa or ent_val:
         prof.appattest_flag = True
@@ -267,27 +426,35 @@ def classify(app: ExtractedApp) -> DefenseProfile:
             matched["appattest_symbols"] = aa
         if ent_val:
             matched["appattest_entitlement"] = [f"{ENT_APPATTEST}={ent_val}"]
-    dc = _find_all(hay, DEVICECHECK_MARKERS)
+    dc = _find_all(hay_l, lowered=True, patterns=DEVICECHECK_MARKERS)
     if dc:
         prof.devicecheck_flag = True
         matched["devicecheck"] = dc
+    sdks = sorted(n for n, toks in ATTEST_SDK_MARKERS.items()
+                  if _find_all(hay_l, toks, lowered=True))
+    if sdks:
+        matched["attest_sdks"] = sdks
+    providers = sorted(n for n, toks in APPCHECK_PROVIDER_MARKERS.items()
+                       if _find_all(hay_l, toks, lowered=True))
+    if providers:
+        matched["appcheck_providers"] = providers
 
     # --- Anti-tamper / anti-debug / jailbreak detection ---
-    at = _find_all(hay, ANTI_TAMPER_MARKERS)
+    at = _find_all(hay_l, lowered=True, patterns=ANTI_TAMPER_MARKERS)
     if at:
         prof.anti_tamper_hints = True
         matched["anti_tamper"] = at
-    ad = _find_all(hay, ANTI_DEBUG_MARKERS)
+    ad = _find_all(hay_l, lowered=True, patterns=ANTI_DEBUG_MARKERS)
     if ad:
         prof.anti_debug_hints = True
         matched["anti_debug"] = ad
-    jb = _find_all(hay, JAILBREAK_MARKERS)
+    jb = _find_all(hay_l, lowered=True, patterns=JAILBREAK_MARKERS)
     if jb:
         prof.jailbreak_detection_hints = True
         matched["jailbreak_detection"] = jb
 
     # --- Network extension (can VPN around the proxy) ---
-    if app.entitlements.get(ENT_NETEXT) or _find_all(hay, ["NEVPNManager", "NETunnelProvider"]):
+    if app.entitlements.get(ENT_NETEXT) or _find_all(hay_l, lowered=True, patterns=["NEVPNManager", "NETunnelProvider"]):
         prof.networkextension_flag = True
         matched["networkextension"] = ["entitlement/NE"]
 

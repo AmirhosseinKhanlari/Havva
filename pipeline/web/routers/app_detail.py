@@ -39,6 +39,18 @@ def _ipa_dir() -> str:
     return str(d)
 
 
+def _decode_json_field(row, key: str) -> dict:
+    """JSON column -> dict ({} when absent / unparseable)."""
+    try:
+        if row is None or key not in row.keys() or not row[key]:
+            return {}
+        import json as _json
+        v = _json.loads(row[key])
+        return v if isinstance(v, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _decode_storage(row):
     """Decode the storage_probe row's JSON fields for the template."""
     if not row:
@@ -138,6 +150,7 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
         ctx["outcome"] = db.get_outcome(app_id)
         ctx["pinning"] = db.get_pinning_probe(app_id)
         ctx["sideload"] = db.get_sideload_probe(app_id)
+        ctx["sideload_evidence"] = _decode_json_field(ctx["sideload"], "evidence")
         ctx["storage"] = _decode_storage(db.get_storage_probe(app_id))
         from ... import instrument
         from ...config import CONFIG
@@ -153,6 +166,7 @@ def _tab_context(request: Request, app_id: str, tab: str) -> dict:
         ctx["monitor_default"] = CONFIG.runtime.monitor_seconds
     elif tab == "attest":
         ctx["attestation"] = db.get_attestation(app_id)
+        ctx["attest_probes"] = _decode_json_field(ctx["attestation"], "probe_results")
         ctx["attest_usage"] = _attest_usage(db, app_id)
     return ctx
 
@@ -719,13 +733,23 @@ async def act_dynamic_pinning(app_id: str, request: Request, _: None = Depends(r
                         "test pinning; skipped the bypass run.\n")
                 return
             tag = "" if res["reliable"] else " (open/bypassed split UNRELIABLE: clean run did not launch)"
+            rj = res.get("rejections", {})
             ctx.log(f"bypassable-pinned: {len(res['pinned'])} | "
                     f"hard-pinned: {len(res['hard_pinned'])} | "
-                    f"open: {len(res['not_pinned'])}{tag}\n")
+                    f"open: {len(res['not_pinned'])} | "
+                    f"leads: {len(res.get('leads', []))} | unverified: {len(res.get('unverified', []))}"
+                    f"{tag}\n")
+            ctx.log(f"CA rejections in the device syslog (this app's process): "
+                    f"clean={rj.get('clean', 0)} bypass={rj.get('bypass', 0)}\n")
             for h in res["pinned"]:
                 ctx.log(f"  \N{LOCK} {h} (bypassed by SSL Kill Switch)\n")
             for h in res["hard_pinned"]:
-                ctx.log(f"  \N{SHIELD} {h} (HARD-PINNED: bypass failed)\n")
+                ctx.log(f"  \N{SHIELD} {h} (HARD-PINNED: rejected our CA even with the bypass)\n")
+            for h in res.get("leads", []):
+                ctx.log(f"  lead: {h} (upstream TLS failure, not attributed; confirm by hand)\n")
+            for h in res.get("unverified", []):
+                ctx.log(f"  unverified: {h} (seen only in the bypass window; not counted)\n")
+            ctx.log(f"verdict: {res.get('outcome', '?').upper()}\n")
 
     jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True,
                                     params={"mode": "pinning", "aliased": aliased})
@@ -749,7 +773,17 @@ async def act_dynamic_sideload(app_id: str, request: Request, _: None = Depends(
                     f"{', entitlement-shim' if entshim else ''}): "
                     "plain re-sign (control) vs SideloadFix\n")
             res = dynamic.detect_sideload(get_db(), row, sign_env=sign_env,
-                                          monitor_seconds=monitor_seconds, entshim=entshim)
+                                          monitor_seconds=monitor_seconds, entshim=entshim,
+                                          stop_check=lambda: ctx.cancelled)
+            ev = res.get("evidence", {})
+            for arm in ("control", "fixed"):
+                a = ev.get(arm, {})
+                ctx.log(f"  {arm}: {a.get('status')}"
+                        f"{' class=' + a['crash_class'] if a.get('crash_class') not in (None, 'none') else ''}"
+                        f"{' intent=' + a['intent'] if a.get('intent') else ''}"
+                        f"{' reason: ' + a['reason'][:160] if a.get('reason') else ''}\n")
+            if ev.get("static_markers"):
+                ctx.log(f"  static integrity markers: {', '.join(ev['static_markers'])}\n")
             ctx.log(f"verdict: {res['verdict']} — {res['note']}\n")
 
     jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True,
@@ -766,16 +800,23 @@ async def act_dynamic_storage(app_id: str, request: Request, _: None = Depends(r
     sign_env = form.get("sign_env") or "dev"
     monitor_seconds = _parse_secs(form.get("monitor_seconds"))
     entshim = form.get("entshim") == "on"
+    login = form.get("login") == "on"
 
     def job(ctx):
         from ... import dynamic
         with tee_pipeline_logs(ctx):
             ctx.log(f"data-storage inspection ({sign_env} signing, {monitor_seconds or 'default'}s"
-                    f"{', entitlement-shim' if entshim else ''}): "
-                    "run app, pull container, scan unencrypted stores\n")
+                    f"{', entitlement-shim' if entshim else ''}{', UI login' if login else ''}): "
+                    "drive app with StorageObserver, pull container, scan stores + Keychain\n")
             res = dynamic.inspect_storage(get_db(), row, sign_env=sign_env,
-                                          monitor_seconds=monitor_seconds, entshim=entshim)
-            ctx.log(f"verdict: {res['verdict']} — {len(res['findings'])} finding(s)\n")
+                                          monitor_seconds=monitor_seconds, entshim=entshim,
+                                          login=login, stop_check=lambda: ctx.cancelled)
+            by = {}
+            for f in res["findings"]:
+                by[f["severity"]] = by.get(f["severity"], 0) + 1
+            ctx.log(f"verdict: {res['verdict']} — {len(res['findings'])} finding(s) "
+                    f"({', '.join(f'{k}: {v}' for k, v in sorted(by.items()))})\n")
+            ctx.log(f"{res['note']}\n")
 
     jid = get_jobs_manager().submit("dynamic", app_id, job, device_bound=True,
                                     params={"mode": "storage", "sign_env": sign_env})

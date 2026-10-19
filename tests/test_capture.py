@@ -223,3 +223,60 @@ def test_export_session_accepts_freshly_written_suffixed_file(tmp_path, monkeypa
     monkeypatch.setattr(_capture, "run_cmd", fake_cli)
     p = tmp_path / "x.proxymansession"
     assert _capture.export_session(p, retries=1) == tmp_path / "x.proxymansessionv2"
+
+
+# ---- https-only host sets, exact client match, syslog TLS rejections --------
+
+from pipeline.capture import cleartext_hosts, tls_rejections  # noqa: E402
+
+
+def test_app_hosts_ignores_cleartext_flows():
+    # A plain-HTTP beacon / OCSP fetch says nothing about pinning.
+    har = _har([_entry("http://ocsp.digicert.com/x"), _entry("http://beacon.example.com/p"),
+                _entry("https://api.example.com/v1")])
+    flows = har_to_flows(har, device_ip="192.168.1.116")
+    assert app_hosts(flows, excluded=[]) == {"api.example.com"}
+    assert cleartext_hosts(flows, excluded=[]) == {"ocsp.digicert.com", "beacon.example.com"}
+    assert reached_any_network(flows, excluded=[])   # it did talk, though
+
+
+def test_device_ip_filter_is_exact_and_keeps_unattributed_entries():
+    har = _har([
+        _entry("https://api.example.com/x", client="192.168.1.17"),
+        _entry("https://other.example.com/y", client="192.168.1.170"),   # a different host
+        _entry("https://port.example.com/z", client="192.168.1.17:54321"),
+    ])
+    flows = har_to_flows(har, device_ip="192.168.1.17")
+    assert {f.host for f in flows} == {"api.example.com", "port.example.com"}
+    # No client field at all: kept (unknown is not 'someone else'), never
+    # judged by the server address.
+    e = _entry("https://noclient.example.com/", client=None)
+    del e["_clientAddress"]
+    e["serverIPAddress"] = "1.2.3.4"
+    assert [f.host for f in har_to_flows(_har([e]), device_ip="192.168.1.17")] == ["noclient.example.com"]
+
+
+_SYSLOG = """\
+Oct 18 22:10:01 iPhone Bank(CFNetwork)[512] <Notice>: Task <A1>.<1> HTTP load failed, 0/0 bytes (error code: -1202 [3:-9802])
+Oct 18 22:10:01 iPhone Bank(CFNetwork)[512] <Error>: Task <A1>.<1> finished with error [-1202] Error Domain=NSURLErrorDomain Code=-1202 "The certificate for this server is invalid. You might be connecting to a server that is pretending to be “api.bank.example” which could put your confidential information at risk." UserInfo={NSErrorFailingURLStringKey=https://api.bank.example/v1/login, x=y}
+Oct 18 22:10:02 iPhone Bank(libboringssl.dylib)[512] <Error>: boringssl_session_handshake_error_print(44) [C3.1.1.1:2][0x1] Error: 4310442808:error:1000007d:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED:/Library/Caches/...
+Oct 18 22:10:03 iPhone Bank(CFNetwork)[512] <Notice>: Task <B2>.<1> HTTP load failed, 0/0 bytes (error code: -999 [1:89])
+Oct 18 22:10:04 iPhone OtherApp(CFNetwork)[700] <Notice>: Task <C3>.<1> HTTP load failed, 0/0 bytes (error code: -1202 [3:-9802])
+Oct 18 22:10:05 iPhone Bank(CFNetwork)[512] <Notice>: Task <D4>.<1> finished successfully
+Oct 18 22:10:06 iPhone Bank(CFNetwork)[512] <Error>: Task <E5>.<1> finished with error [-1202] Error Domain=NSURLErrorDomain Code=-1202 UserInfo={NSErrorFailingURLStringKey=https://gsp.apple.com/x}
+"""
+
+
+def test_tls_rejections_attributed_to_the_app_process():
+    r = tls_rejections(_SYSLOG, {"Bank"})
+    assert r["rejected"] == 4          # -1202 x3 (one is Apple, host dropped, still a rejection) + boringssl
+    assert r["cancelled"] == 1         # the -999
+    assert r["codes"]["-1202"] == 3 and r["codes"]["boringssl"] == 1 and r["codes"]["-999"] == 1
+    assert r["hosts"] == ["api.bank.example"]   # from the error, Apple host excluded
+    assert len(r["samples"]) == 5
+    # Another process's rejection is not ours.
+    assert tls_rejections(_SYSLOG, {"OtherApp"})["rejected"] == 1
+    # No filter: everything counts.
+    assert tls_rejections(_SYSLOG)["rejected"] == 5
+    # Nothing in, nothing out.
+    assert tls_rejections("", {"Bank"})["rejected"] == 0

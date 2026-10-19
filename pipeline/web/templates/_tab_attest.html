@@ -104,10 +104,24 @@
 {% if attestation %}
 <div class="banner {% if attestation['backend_behavior']=='fail_open' %}hit{% endif %}" style="margin-bottom:12px">
   <div class="row1">
-    <span class="bdot" style="background:{% if attestation['backend_behavior']=='fail_closed' %}var(--ok){% elif attestation['backend_behavior']=='fail_open' %}var(--bad){% else %}var(--ink3){% endif %}"></span>
-    <span class="btitle" style="text-transform:capitalize">{{ (attestation['backend_behavior'] or 'inconclusive').replace('_',' ') }}</span>
+    <span class="bdot" style="background:{% if attestation['backend_behavior']=='fail_closed' %}var(--ok){% elif attestation['backend_behavior']=='soft_degraded' %}var(--warn){% elif attestation['backend_behavior']=='fail_open' %}var(--bad){% else %}var(--ink3){% endif %}"></span>
+    <span class="btitle" style="text-transform:capitalize">{{ (attestation['backend_behavior'] or 'inconclusive').replace('_',' ') }}{% if 'verdict' in attestation.keys() and attestation['verdict'] %} · {{ attestation['verdict'].replace('_',' ') }}{% endif %}{% if attest_probes and attest_probes.get('tier') %} <span class="pill small" title="T0 refused at enrollment (provenance verified) · T1 enrolled, probes refused · T1s soft · T2 a probe served · T3 assertions unused">{{ attest_probes['tier'] }}</span>{% endif %}</span>
   </div>
   <div class="muted" style="margin-top:8px;padding-left:22px;font-size:12.5px">tested: {{ attestation['tested_flag'] }} · neutralized: {{ attestation['neutralized_flag'] }}{% if attestation['error'] %} · {{ attestation['error'][:140] }}{% endif %}</div>
+  {% if attest_probes and attest_probes.get('reasons', {}).get('baseline') %}
+  <div class="muted" style="margin-top:6px;padding-left:22px;font-size:12px">baseline: {{ attest_probes['reasons']['baseline'][:200] }}</div>
+  {% endif %}
+  {% if attest_probes and attest_probes.get('served') %}
+  {% set PROBE_WHAT = {'omit': 'F1 assertion omitted', 'tamper': 'F1 signature corrupted', 'bind': 'F3 request altered after signing', 'replay': 'F4 first assertion re-sent', 'noreg': 'key registration failed (weak)', 'downgrade': 'isSupported forced NO'} %}
+  <div class="muted" style="margin-top:8px;padding-left:22px;font-size:12px;display:grid;grid-template-columns:auto auto 1fr;gap:4px 12px">
+    {% for name, val in attest_probes['served'].items() if name != 'baseline' %}
+    <span style="font-weight:600">{{ name }}</span>
+    <span style="color:{% if val is true %}var(--bad){% elif val == 'degraded' %}var(--warn){% elif val is false %}var(--ok){% else %}var(--ink3){% endif %}">{{ 'served in full' if val is true else ('degraded' if val == 'degraded' else ('refused' if val is false else 'inconclusive')) }}</span>
+    <span>{{ PROBE_WHAT.get(name, '') }}{% if attest_probes.get('reasons', {}).get(name) %} · {{ attest_probes['reasons'][name][:120] }}{% endif %}</span>
+    {% endfor %}
+    {% if attest_probes.get('reasons', {}).get('coverage') %}<span style="font-weight:600">coverage</span><span>{{ attest_probes['reasons']['coverage'].replace('_',' ') }}</span><span>per request / per session (attest at login, bound session) / partial</span>{% endif %}
+  </div>
+  {% endif %}
 </div>
 {% else %}
 <p class="muted" style="font-size:14px">Not tested yet. Requires the XR + results/accounts.json (test accounts).</p>

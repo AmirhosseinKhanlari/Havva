@@ -57,7 +57,11 @@ def test_partial_coverage_when_enforced_but_some_endpoints_unattested():
 # ---- assertion detection ------------------------------------------------------
 
 def test_assertion_detected_in_header_name_and_value():
-    assert _req_carries_assertion(_flow("https://a.com/x", headers={"x-app-attest": "abc"}))
+    assert _req_carries_assertion(_flow("https://a.com/x", headers={"x-app-attest": "abcdefghijklmnopqrstuvwxyz0123"}))
+    # An attestation-named header with an EMPTY / trivial value is an omitted
+    # assertion, not a carried one (the omit probe depends on this).
+    assert not _req_carries_assertion(_flow("https://a.com/x", headers={"x-app-attest": ""}))
+    assert not _req_carries_assertion(_flow("https://a.com/x", headers={"x-assertion": "abc"}))
     assert _req_carries_assertion(_flow("https://a.com/x", headers={"x-proof": "approov-token-zzz"}))
 
 
@@ -70,18 +74,18 @@ def test_client_assertion_oauth_body_is_not_attestation():
 
 def test_gated_endpoints_only_attested_data_responses():
     flows = [
-        _flow("https://api.example.com/entitlements", headers={"x-app-attest": "abc"}),
+        _flow("https://api.example.com/entitlements", headers={"x-app-attest": "abcdefghijklmnopqrstuvwxyz0123"}),
         _flow("https://api.example.com/profile", headers={}),                 # no assertion
-        _flow("https://gsp.apple.com/x", headers={"x-app-attest": "abc"}),   # excluded host
-        _flow("https://api.example.com/empty", body="", headers={"x-app-attest": "abc"}),  # trivial
-        _flow("https://api.example.com/denied", status=401, headers={"x-app-attest": "abc"}),
+        _flow("https://gsp.apple.com/x", headers={"x-app-attest": "abcdefghijklmnopqrstuvwxyz0123"}),   # excluded host
+        _flow("https://api.example.com/empty", body="", headers={"x-app-attest": "abcdefghijklmnopqrstuvwxyz0123"}),  # trivial
+        _flow("https://api.example.com/denied", status=401, headers={"x-app-attest": "abcdefghijklmnopqrstuvwxyz0123"}),
     ]
     assert _gated_endpoints(flows) == {"api.example.com/entitlements"}
 
 
 def test_coverage_counts_attested_endpoints():
     flows = [
-        _flow("https://api.example.com/entitlements", headers={"x-app-attest": "abc"}),
+        _flow("https://api.example.com/entitlements", headers={"x-app-attest": "abcdefghijklmnopqrstuvwxyz0123"}),
         _flow("https://api.example.com/profile", headers={}),
         _flow("https://gsp.apple.com/x", headers={}),
         _flow("https://api.example.com/empty", body="", headers={}),
@@ -95,25 +99,25 @@ GATED = {"api.example.com/entitlements"}
 
 
 def test_probe_inconclusive_when_not_armed_or_no_hit():
-    f = [_flow("https://api.example.com/entitlements", headers={"x-app-attest": "garbage"})]
+    f = [_flow("https://api.example.com/entitlements", headers={"x-app-attest": "garbage-garbage-garbage-garbage"})]
     assert _probe_outcome("tamper", GATED, f, armed=False, hit=True)[0] is None
     assert _probe_outcome("tamper", GATED, f, armed=True, hit=False)[0] is None
     assert _probe_outcome("tamper", set(), f, armed=True, hit=True)[0] is None
 
 
 def test_tamper_served_with_garbage_assertion_is_weakness():
-    f = [_flow("https://api.example.com/entitlements", headers={"x-app-attest": "garbage"})]
+    f = [_flow("https://api.example.com/entitlements", headers={"x-app-attest": "garbage-garbage-garbage-garbage"})]
     assert _probe_outcome("tamper", GATED, f, armed=True, hit=True)[0] is True
 
 
 def test_tamper_refused_is_definite_false():
     f = [_flow("https://api.example.com/entitlements", status=403, body="denied" * 20,
-               headers={"x-app-attest": "garbage"})]
+               headers={"x-app-attest": "garbage-garbage-garbage-garbage"})]
     assert _probe_outcome("tamper", GATED, f, armed=True, hit=True)[0] is False
 
 
 def test_omit_served_only_counts_requests_WITHOUT_assertion():
-    cached = [_flow("https://api.example.com/entitlements", headers={"x-app-attest": "cached"})]
+    cached = [_flow("https://api.example.com/entitlements", headers={"x-app-attest": "cached-assertion-blob-000001"})]
     assert _probe_outcome("omit", GATED, cached, armed=True, hit=True)[0] is None  # cached token, no evidence
     bare = [_flow("https://api.example.com/entitlements", headers={})]
     assert _probe_outcome("omit", GATED, bare, armed=True, hit=True)[0] is True

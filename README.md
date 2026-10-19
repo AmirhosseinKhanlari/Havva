@@ -38,11 +38,11 @@ A FastAPI + HTMX console ("Havva" proper) sits on top of the whole thing so a ru
 | Dimension | Static signal | Dynamic truth | Verdict space |
 |---|---|---|---|
 | **TLS certificate pinning** | pinning libraries, `NSPinnedDomains`, hand-rolled trust evaluators, configuration-based pins | app re-signed, SSL Kill Switch injected, traffic observed through a MITM proxy; escalation ladder of bypass rungs | `effective`, `ineffective`, `absent`, `inconclusive` |
-| **App Attest / DeviceCheck** | `DCAppAttestService` symbols, entitlement, DeviceCheck tokens (counted separately, never conflated) | hooks observe real calls, then four probes (tamper, omit, no-registration, downgrade) test whether the server **refuses** | `ENFORCED`, `SOFT`, `ADOPTED_NOT_ENFORCED`, `NOT_USED`, `INCONCLUSIVE` |
+| **App Attest / DeviceCheck** | `DCAppAttestService` symbols, entitlement, DeviceCheck tokens (counted separately), attestation SDKs and App Check provider | hooks observe real calls (and `isSupported`); attested requests found by CBOR content fingerprint and hook timing; probes tamper (signature only), omit, bind (F3), replay (F4), noreg, downgrade, with response diffing against the baseline | `ENFORCED`, `SOFT_DEGRADED`, `PARTIAL_COVERAGE`, `SIGNATURE_NOT_VERIFIED`, `NOT_REQUIRED`, `UNBOUND_REQUEST`, `REPLAYABLE`, `NOT_REGISTERED_OK`, `DOWNGRADEABLE`, `INCONCLUSIVE` |
 | **In-app purchase** | StoreKit 1 vs 2 generation, deprecated `verifyReceipt` hosts, on-device PKCS#7 receipt parsing, managed IAP SDKs, shipped `.storekit` configs | MITM replay of validation responses (paper-1 methodology) | risk `high` / `medium` / `low` / `info`, with the validation path named |
-| **Sideload / anti-tamper** | code-signing markers, jailbreak and debugger checks | re-signed launch, crash-report attribution (`.ips`), EvasionKit neutralization rung | `blocks`, `tolerates`, `crashes-for-other-reason` |
+| **Sideload / anti-resign** | integrity SDK markers (IOSSecuritySuite, FreeRASP), jailbreak and debugger checks | plain re-sign vs SideloadFix launch pair with liveness polling; crash reason and intent read from the `.ips`; EvasionKit neutralization rung | `no_detection`, `resign_fragile`, `anti_resign`, `anti_resign_unrecovered`, `entitlement_crash`, `resign_broken`, `blocked_unrecovered`, `inconclusive` |
 | **App Transport Security** | `NSAppTransportSecurity` exceptions and their blast radius | runtime cleartext observation with tri-state `exception_effect` | per-exception effect |
-| **On-device storage** | plist / keychain / sqlite / cache scan for secrets and tokens | n/a | findings with severity |
+| **On-device storage** | storage API hints (NSUserDefaults, SQLite, Realm, weak Keychain accessibility) | drive through login with StorageObserver injected (per-file Data Protection class, Keychain accessibility), pull the container, scan plists, SQLite with WAL applied, cookies | `credentials_exposed`, `tokens_in_files`, `pii_in_files`, `data_only`, `clean`, `inconclusive` |
 | **SBOM / CVEs** | embedded frameworks and SDK versions | n/a | per-dependency CVE list |
 
 ## How a run flows
@@ -160,14 +160,14 @@ Operates on the decrypted Mach-O plus `Info.plist` and the bundle listing, and n
 - **App Attest**: `DCAppAttestService` symbols and the entitlement; DeviceCheck is reported in its own field. Static says *adopted*; only the dynamic stage can say *enforced*.
 - **IAP** (`pipeline/iap_static.py`): StoreKit generation (1, 2, both, SDK-only), the validation path (`server-apple-api`, `storekit2-jws`, `sdk`, `client-verifyreceipt`, `on-device-receipt`, `unknown`), and non-IAP StoreKit uses (reviews, promotion, ads) kept out of the IAP decision. Evidence is strength-gated: SK1 class names alone are *latent*; a deprecated `verifyReceipt` full host, a managed SDK, the App Store Server API, or a strong StoreKit 2 token is *active*.
 - **ATS**: every exception, its scope, and whether the runtime actually exercised it.
-- **Storage**: the on-device data container after a drive, scanned for credentials, tokens, and PII.
+- **Storage**: static API hints only; the real check is the dynamic probe, which drives the app through login with StorageObserver injected and then pulls and scans the container.
 - **SBOM / CVE**: embedded frameworks with versions, matched against known CVEs.
 
 ### Dynamic
 1. **Re-sign** the IPA with the lab developer certificate. Entitlements that the re-sign necessarily strips can make the app throw at launch; `EntitlementShim` (below) catches exactly those exceptions so the crash is not misread as anti-tamper.
 2. **Inject** the selected dylibs (see the catalog), under innocuous names when evasion is on, and validate every requested dylib id up front.
 3. **Drive** with Appium: reach the login screen, authenticate with a lab account, exercise the app for a monitoring window, while `idevicesyslog` captures the device log and the proxy records traffic.
-4. **Observe** liveness tri-state (running, died, unknown), attribute crashes to the exact `.ips` report for this launch (no `-k` fuzzing), and export the HAR only after unlinking the previous one so a stale file is never re-read.
+4. **Observe** liveness tri-state (running, died, unknown), attribute crashes to the exact `.ips` report for this launch (no `-k` fuzzing), and export the HAR only after unlinking the previous one so a stale file is never re-read. The drive runs under a device syslog capture: when the app rejects the proxy certificate, CFNetwork and BoringSSL log it under the app's process name, which is the only direct, process-attributed evidence of pinning (the proxy sees nothing). Only TLS flows count as hosts; cleartext is reported separately.
 5. **Escalate** through the bypass ladder (baseline → SSL Kill Switch → SideloadFix → EvasionKit → frida) until the app's own traffic appears in the proxy. A crash *under* a bypass rung is `INCONCLUSIVE`, never a bypass success. Apple's own traffic (push, iCloud, telemetry) is excluded before "reached any network" is computed.
 
 ### Attestation
@@ -193,6 +193,7 @@ All loadable copies live at the repository root; sources for ours are under `twe
 | `frida` | FridaGadget (`libServiceBridge` family) | script-driven hooks for probes | frida |
 | `evasion` | `EvasionKit.dylib` (`libSystemBridge`) | hides injected images from `dyld` enumeration, bounds `ptrace`/`sysctl` anti-debug, remaps header/slide, `csops` flags; strictly measurement hygiene | ours, `tweaks/EvasionKit` |
 | `attest` | `AttestObserver.dylib` (`libServiceBridge`) | install-once hooks on `DCAppAttestService` and DeviceCheck that log every call, key id, and assertion to syslog | ours, `tweaks/AttestObserver` |
+| `storageobs` | `StorageObserver.dylib` (`libDataBridge`) | logs every container file's Data Protection class and the app's Keychain items with their accessibility class, names only, never values | ours, `tweaks/StorageObserver` |
 | `entshim` | `EntitlementShim.dylib` (`libAccountBridge`) | constructor-time swizzle of the app delegate and scene delegates, wrapping entry points in `@try/@catch` trampolines that swallow *only* `NSException`s whose reason names a missing entitlement | ours, `tweaks/EntitlementShim` |
 
 `EntitlementShim` exists because of a real false positive: a major streaming app crashed on every re-signed launch and looked like anti-tamper. The crash report showed an uncaught exception from a video-subscriber framework demanding an entitlement the re-sign had stripped, turned into `abort()` by a crash-reporting SDK's uncaught-exception handler. Wrapping the delegate let the app run and be measured. The shim is generic (env `ENTSHIM_TARGETS`, `ENTSHIM_MATCH_ALL`) and available as a toggle on every dynamic and attestation run.

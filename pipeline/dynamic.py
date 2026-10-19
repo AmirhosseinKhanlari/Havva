@@ -43,6 +43,18 @@ class ConfigRun:
     conn_outcomes: dict = None
     run_log: str = ""        # captured pipeline log lines for just this run
     flows: list = None       # captured Flow objects (for IAP-bypass analysis)
+    # Device-side TLS rejections by THIS app's process (capture.tls_rejections):
+    # the only direct, process-attributed evidence that the app refused our CA.
+    tls_rejections: dict = None
+    cleartext_hosts: set = None   # plain-HTTP hosts (reported, never a pinning verdict)
+
+    @property
+    def rejected(self) -> int:
+        return int((self.tls_rejections or {}).get("rejected", 0))
+
+    @property
+    def rejected_hosts(self) -> set:
+        return set((self.tls_rejections or {}).get("hosts", []))
 
 
 @dataclass
@@ -51,20 +63,49 @@ class LaunchProbe:
     built: bool
     installed: bool
     launched: bool
-    alive: bool          # still running after the window
+    alive: bool | None   # still running after the window; None = liveness unknown
     crashed: bool
     error: str = ""
+    launch_failed: bool = False      # no pid AND no crash report: tooling, not the app
+    crash_class: CrashClass = CrashClass.NONE
+    crash_reason: str = ""
+    intent: str = ""                 # tamper | entitlement | "" (escalate.crash_intent)
 
     @property
     def survived(self) -> bool:
-        return self.launched and self.alive and not self.crashed
+        return self.launched and self.alive is True and not self.crashed
+
+    @property
+    def status(self) -> str:
+        """ran | blocked | unknown. 'unknown' is a tooling gap (build, install,
+        launch or liveness), never an observation about the app."""
+        if not self.built or not self.installed or self.launch_failed:
+            return "unknown"
+        if self.survived:
+            return "ran"
+        if self.crashed or self.alive is False:
+            return "blocked"
+        return "unknown"
+
+    def evidence(self) -> dict:
+        return {"status": self.status, "launched": self.launched, "alive": self.alive,
+                "crashed": self.crashed, "launch_failed": self.launch_failed,
+                "crash_class": self.crash_class.value, "reason": self.crash_reason,
+                "intent": self.intent, "error": self.error}
 
 
 def _launch_probe(app_id: str, bundle_id: str, decrypted_ipa: str, label: str,
-                  specs, sign_env, secs: int, entshim: bool = False) -> LaunchProbe:
-    """Build + install + launch, wait `secs`, check liveness, uninstall. No
-    Proxyman capture -- this only asks 'did the app stay running?'."""
-    import time
+                  specs, sign_env, secs: int, entshim: bool = False,
+                  stop_check=None) -> LaunchProbe:
+    """Build + install + launch, watch liveness for `secs`, read the crash
+    report, uninstall. No Proxyman capture: this only asks 'did the app stay
+    running, and if not, what did it say on the way out?'.
+
+    Three outcomes are kept apart because the verdict depends on it:
+      ran      : launched and still alive at the end of the window
+      blocked  : exited on its own (two consecutive misses) or left a crash report
+      unknown  : build / install / launch tooling failed, or liveness could not
+                 be read; never an observation about the app."""
     rs = CONFIG.signing.resolve(sign_env)
     prefer = "devicectl" if rs.get_task_allow else "pmd3"
     log.info("[%s] building (%s signing) ...", label, rs.env)
@@ -72,40 +113,67 @@ def _launch_probe(app_id: str, bundle_id: str, decrypted_ipa: str, label: str,
                                        sign_env=sign_env, entshim=entshim)
     if not ok:
         log.warning("  build failed: %s", err)
-        return LaunchProbe(label, False, False, False, False, False, err)
+        return LaunchProbe(label, False, False, False, None, False, err)
     inst, ierr = device.install_ipa(signed)
     if not inst:
         log.warning("  install failed: %s", ierr)
-        return LaunchProbe(label, True, False, False, False, False, ierr)
-    log.info("  installed; launching + waiting %ss ...", secs)
+        return LaunchProbe(label, True, False, False, None, False, ierr)
+    log.info("  installed; launching + watching liveness for %ss ...", secs)
     # Consume any report left on the device (e.g. the control run's) so this
     # probe's fetch only sees a crash that happened AFTER this launch.
     device.flush_crash_reports()
     pid = device.launch(bundle_id, prefer=prefer)
     launched = pid is not None
-    time.sleep(secs)
-    # is_app_running is tri-state (None = unknown). Only a definite False means
-    # the app exited; an unknown must not become a false "detected".
-    running = device.is_app_running(bundle_id) if launched else False
-    if launched and running is None:
-        log.warning("  liveness unknown (device query failed); not treating as exited")
-    alive = bool(launched) and running is not False
-    crashed = bool(device.fetch_crash_report(bundle_id))
-    log.info("  launched=%s alive=%s crashed=%s", launched, alive, crashed)
+    if not launched:
+        # No pid. A crash report means the app came up and died at launch
+        # (SpringBoard reports it); no report means the LAUNCH failed (denied,
+        # tunnel, tooling) and says nothing about the app.
+        report = device.fetch_crash_report(bundle_id)
+        device.uninstall(bundle_id)
+        if report:
+            reason = escalate.crash_reason(report)
+            log.info("  died at launch: %s", reason[:160] or "(no reason)")
+            return LaunchProbe(label, True, True, True, False, True, "",
+                               crash_class=escalate.classify_crash(report, True, False),
+                               crash_reason=reason, intent=escalate.crash_intent(reason))
+        log.warning("  launch failed (no pid, no crash report): tooling, not the app")
+        return LaunchProbe(label, True, True, False, None, False, "launch failed",
+                           launch_failed=True)
+    died = device.watch_liveness(bundle_id, secs, stop_check=stop_check)
+    final = device.is_app_running(bundle_id)
+    if died or final is False:
+        alive: bool | None = False
+    elif final is True:
+        alive = True
+    else:
+        alive = None
+        log.warning("  liveness unknown (device query failed); verdict will be inconclusive")
+    report = device.fetch_crash_report(bundle_id)
+    crashed = bool(report)
+    crash_class = escalate.classify_crash(report, True, False) if report else CrashClass.NONE
+    reason = escalate.crash_reason(report) if report else ""
+    if alive is False and not report:
+        reason = "exited during the window without a crash report (graceful exit)"
+    intent = escalate.crash_intent(reason)
+    log.info("  launched=True alive=%s crashed=%s class=%s%s", alive, crashed, crash_class.value,
+             (" reason=" + reason[:140]) if reason else "")
     device.terminate(pid, bundle_id)
     device.uninstall(bundle_id)
-    return LaunchProbe(label, True, inst, launched, alive, crashed, "")
+    return LaunchProbe(label, True, inst, True, alive, crashed, "",
+                       crash_class=crash_class, crash_reason=reason, intent=intent)
 
 
 def inspect_storage(db: Database, row, sign_env: str | None = None,
-                    monitor_seconds=None, entshim=False) -> dict:
-    """Dynamic insecure-data-storage check. Runs the app, pulls its data
-    container via house_arrest/AFC, and scans the unencrypted stores
-    (NSUserDefaults / SQLite / Core Data / Realm / Cookies / keyboard cache)
-    for secrets and sensitive values. Full-container access needs dev signing
-    (get-task-allow); ad-hoc can usually only vend Documents."""
+                    monitor_seconds=None, entshim=False, driver=None, login=False,
+                    stop_check=None) -> dict:
+    """Data-storage inspection. Drives the app (through login when requested,
+    so the post-auth writes exist), with StorageObserver injected to log each
+    container file's Data Protection class and the app's Keychain items, then
+    pulls the container via house_arrest/AFC and scans the stores.
+    Full-container access needs dev signing (get-task-allow); ad-hoc can
+    usually only vend Documents. A run whose app never launched or whose
+    container could not be pulled is INCONCLUSIVE, with the reason."""
     import shutil
-    import time
     from . import storage_scan
 
     app_id = row["app_id"]
@@ -116,7 +184,8 @@ def inspect_storage(db: Database, row, sign_env: str | None = None,
     bundle_id = _resolve_bundle_id(db, app_id, decrypted, row["bundle_id"])
     if not bundle_id:
         raise RuntimeError("no bundle id (not in DB and unreadable from IPA)")
-    secs = int(monitor_seconds) if monitor_seconds else 6
+    # Post-login writes are what matter; a cold 6s peek saw onboarding state.
+    secs = int(monitor_seconds) if monitor_seconds else 30
 
     rs = CONFIG.signing.resolve(sign_env)
     prefer = "devicectl" if rs.get_task_allow else "pmd3"
@@ -124,8 +193,14 @@ def inspect_storage(db: Database, row, sign_env: str | None = None,
         log.warning("[storage] dist signing: house_arrest may vend Documents only; "
                     "use dev signing for full-container access")
 
-    log.info("[storage] building (%s signing) + installing", rs.env)
-    specs = instrument.custom_specs(["sideloadfix"], aliased=False)
+    def _inconclusive(note: str, findings=None, stores=None) -> dict:
+        db.save_storage_probe(app_id, "inconclusive", note, findings or [], stores or {})
+        log.warning("[storage] inconclusive: %s", note)
+        return {"verdict": "inconclusive", "note": note, "findings": findings or [],
+                "stores": stores or {}}
+
+    log.info("[storage] building (%s signing) + installing (SideloadFix + StorageObserver)", rs.env)
+    specs = instrument.custom_specs(["sideloadfix", "storageobs"], aliased=False)
     ok, signed, err = instrument.build(app_id, decrypted, "storage", specs=specs,
                                        sign_env=sign_env, entshim=entshim)
     if not ok:
@@ -134,32 +209,69 @@ def inspect_storage(db: Database, row, sign_env: str | None = None,
     if not installed:
         raise RuntimeError(f"install failed: {ierr}")
 
-    log.info("[storage] launching + exercising for %ss (so it writes to disk)", secs)
-    pid = device.launch(bundle_id, prefer=prefer)
-    time.sleep(secs)
+    creds = None
+    if login:
+        from . import attestation
+        creds = attestation.creds_for(attestation.load_accounts(), app_id, bundle_id)
+        if not creds:
+            log.info("[storage] UI login requested but no accounts.json entry for %s / %s",
+                     app_id, bundle_id)
+    if driver is None:
+        driver = device.default_driver(credentials=creds or None)
+    elif creds and hasattr(driver, "credentials"):
+        driver.credentials = creds
+
+    log.info("[storage] driving for %ss%s (observer logs protection classes + Keychain) ...",
+             secs, " with UI login" if creds else "")
+    box: dict = {}
+
+    def _drive():
+        box["dr"] = driver.drive(bundle_id, secs, login=bool(creds), prefer=prefer,
+                                 stop_check=stop_check)
+    syslog_text = device.capture_syslog(during=_drive, grep="STORAGEOBS")
+    dr = box.get("dr")
+    if dr is None or not dr.launched:
+        device.uninstall(bundle_id)
+        return _inconclusive("The app did not launch (no pid); nothing was written to inspect.")
+    obs = storage_scan.parse_observer(syslog_text or "")
+    if obs["loaded"]:
+        log.info("[storage] observer: %d dump(s), %d file class(es), %d Keychain item(s)",
+                 obs["dumps"], len(obs["files"]), len(obs["keychain"]))
+    else:
+        log.info("[storage] observer trail missing (dylib not loaded or syslog unavailable); "
+                 "protection classes will be unknown")
 
     dest = CONFIG.paths.work_dir / f"container_{app_id}"
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     pulled_any = False
+    reasons: list[str] = []
     for sub in ("Library", "Documents", "tmp"):
-        if device.pull_container(bundle_id, sub, dest):
+        got, why = device.pull_container_ex(bundle_id, sub, dest)
+        if got:
             pulled_any = True
             log.info("[storage] pulled %s", sub)
-
-    device.terminate(pid, bundle_id)
+        elif why:
+            reasons.append(f"{sub}: {why}")
     device.uninstall(bundle_id)
 
     if not pulled_any:
-        db.save_storage_probe(app_id, "inconclusive",
-                              "Could not pull the app container (need dev signing / app not launchable).",
-                              [], {})
-        log.warning("[storage] nothing pulled -> inconclusive")
-        return {"verdict": "inconclusive", "note": "container not accessible",
-                "findings": [], "stores": {}}
+        # Nothing on disk, but the observer may still have inventoried the
+        # Keychain / file classes from inside the process.
+        findings, stores = storage_scan.apply_observer([], {}, obs)
+        why = "; ".join(sorted(set(reasons))[:3]) or "no files came back"
+        note = f"Could not pull the app container ({why})."
+        if findings:
+            note += " Keychain inventory below comes from the in-process observer only."
+        return _inconclusive(note, findings, stores)
 
     findings, stores = storage_scan.scan_container(dest)
-    verdict, note = storage_scan.verdict_of(findings)
+    findings, stores = storage_scan.apply_observer(findings, stores, obs)
+    verdict, note = storage_scan.verdict_of(findings, observed=bool(obs["files"]))
+    if getattr(dr, "died", False) or dr.crashed:
+        note += " The app exited during the run; the stores reflect a partial session."
+    if creds and dr.login_status not in ("success", "not_needed"):
+        note += f" Login status: {dr.login_status}; post-login data may be missing."
     shutil.rmtree(dest, ignore_errors=True)
     db.save_storage_probe(app_id, verdict, note, findings, stores)
     log.info("[storage] verdict=%s: %d finding(s) across %d store(s)",
@@ -202,13 +314,100 @@ def detect_iap_bypass(db: Database, row, driver: device.UIDriver,
     return {"verdict": verdict, **res, "n_iap_flows": len(iap)}
 
 
+# Static markers that show an INTENTIONAL integrity check shipped in the app,
+# not an SDK that merely reports device state (sysctl/ptrace/'jailbroken' are
+# in every analytics SDK). Used only to grade a blocked control run.
+_STATIC_TAMPER_INTENT = ("IOSSecuritySuite", "FreeRASP", "amIReverseEngineered",
+                         "checkInjectedLibraries", "amIJailbroken")
+
+
+def _static_tamper_markers(db: Database, app_id: str) -> list[str]:
+    try:
+        prof = db.get_static_profile(app_id)
+        if not prof:
+            return []
+        import json as _json
+        mp = _json.loads(prof["matched_patterns"] or "{}")
+        hits = set(mp.get("anti_tamper") or []) | set(mp.get("anti_debug") or [])
+        return sorted(h for h in hits if h in _STATIC_TAMPER_INTENT)
+    except Exception:  # noqa: BLE001 - corroboration only
+        return []
+
+
+_SLF_RECOVERS = ("keychain access group, app-group container and bundle identity are the "
+                 "only things SideloadFix papers over")
+
+
+def sideload_verdict(control: LaunchProbe, fixed: LaunchProbe,
+                     static_markers: list[str] | None = None) -> tuple[str, str, dict]:
+    """Pure verdict for the control (plain re-sign) vs SideloadFix pair.
+
+    SideloadFix fixes exactly: keychain access groups, app-group containers
+    and NSBundle identity. A control that dies and a fix build that runs
+    therefore shows RE-SIGN FRAGILITY that those shims recover; it is an
+    anti-resign CHECK only when something says so: the crash reason names
+    tampering, or the binary ships an integrity SDK (static_markers).
+
+      no_detection             both run
+      anti_resign              control blocked with tamper intent, fix runs
+      resign_fragile           control blocked, fix runs, no intent evidence
+      resign_broken            both blocked by a kernel code-sign kill (our build)
+      entitlement_crash        both blocked, reason names a stripped entitlement
+      anti_resign_unrecovered  both blocked, tamper intent (SideloadFix cannot help)
+      blocked_unrecovered      both blocked, cause unknown
+      inconclusive             a tooling gap on either arm, or fix-dead/control-alive
+    Returns (verdict, note, evidence)."""
+    static_markers = list(static_markers or [])
+    ev = {"control": control.evidence(), "fixed": fixed.evidence(),
+          "static_markers": static_markers}
+    c, f = control.status, fixed.status
+    intents = {control.intent, fixed.intent} - {""}
+    tamper = "tamper" in intents or bool(static_markers)
+    why = control.crash_reason or fixed.crash_reason
+    why_s = f" Reason: {why[:240]}" if why else ""
+    src = ("crash message" if "tamper" in intents else
+           ("static marker " + ", ".join(static_markers)) if static_markers else "")
+
+    if c == "unknown" or f == "unknown":
+        arm = "control" if c == "unknown" else "SideloadFix"
+        pr = control if c == "unknown" else fixed
+        gap = (pr.error or ("liveness could not be read" if pr.launched else "launch failed"))
+        return ("inconclusive", f"The {arm} arm has a tooling gap ({gap}); the app was not "
+                "observed. Re-run.", ev)
+    if c == "ran" and f == "ran":
+        return ("no_detection", "Runs with a plain re-sign: no anti-resign check and no "
+                "re-sign fragility.", ev)
+    if c == "blocked" and f == "ran":
+        if tamper:
+            return ("anti_resign", f"A plain re-sign is blocked and the {src} shows an intentional "
+                    f"integrity check; SideloadFix defeats it.{why_s}", ev)
+        return ("resign_fragile", "A plain re-sign cannot run but recovers under SideloadFix, and "
+                f"nothing names an intentional check: {_SLF_RECOVERS}, so this is most likely a "
+                f"missing entitlement (keychain / app group), not anti-tamper.{why_s}", ev)
+    if c == "blocked" and f == "blocked":
+        if CrashClass.KERNEL_CODESIGN in (control.crash_class, fixed.crash_class):
+            return ("resign_broken", "Both builds were killed by the kernel for an invalid code "
+                    f"signature: the re-sign itself is broken, not the app.{why_s}", ev)
+        if "entitlement" in intents and not tamper:
+            return ("entitlement_crash", "Both builds die on a stripped entitlement the shims do "
+                    f"not cover; re-run with the entitlement shim enabled.{why_s}", ev)
+        if tamper:
+            return ("anti_resign_unrecovered", f"Both builds are blocked and the {src} shows an "
+                    f"intentional integrity check SideloadFix cannot defeat.{why_s}", ev)
+        return ("blocked_unrecovered", "Neither build stayed running and the crash evidence does "
+                f"not say why.{why_s}", ev)
+    return ("inconclusive", "Ran without SideloadFix but not with it: anomalous (injection "
+            f"itself may be detected, or a flaky launch). Re-run.{why_s}", ev)
+
+
 def detect_sideload(db: Database, row, sign_env: str | None = None,
-                    monitor_seconds=None, entshim=False) -> dict:
-    """Sideload / anti-resign detection via a differential launch:
-      control : plain re-sign, NOTHING injected.
+                    monitor_seconds=None, entshim=False, stop_check=None) -> dict:
+    """Re-sign fragility / anti-resign detection via a differential launch:
+      control : plain re-sign, NOTHING injected (the entitlement shim, if
+                requested, is the one exception and is noted in the verdict).
       fix     : SideloadFix injected.
-    If the control can't stay running but the SideloadFix build can, the app
-    detects sideloading (and SideloadFix defeats it)."""
+    Each arm watches liveness for the window and keeps its crash reason; the
+    pair is graded by sideload_verdict()."""
     app_id = row["app_id"]
     ac = db.get_acquisition(app_id)
     decrypted = ac["ipa_path"] if ac else ""
@@ -217,31 +416,30 @@ def detect_sideload(db: Database, row, sign_env: str | None = None,
     bundle_id = _resolve_bundle_id(db, app_id, decrypted, row["bundle_id"])
     if not bundle_id:
         raise RuntimeError("no bundle id (not in DB and unreadable from IPA)")
-    secs = int(monitor_seconds) if monitor_seconds else 5
+    # Integrity checks often run after the first network round-trip or on a
+    # background queue; a 5s peek missed them. Liveness is polled throughout.
+    secs = int(monitor_seconds) if monitor_seconds else 20
 
-    log.info("[sideload] control run: plain re-sign, no SideloadFix")
+    log.info("[sideload] control run: plain re-sign, no SideloadFix%s",
+             " (+ entitlement shim: not a plain control for image-enumerating apps)" if entshim else "")
     control = _launch_probe(app_id, bundle_id, decrypted, "sideload:control", [], sign_env, secs,
-                            entshim=entshim)
+                            entshim=entshim, stop_check=stop_check)
+    if stop_check and stop_check():
+        raise RuntimeError("cancelled")
     log.info("[sideload] fix run: SideloadFix injected")
     slf_specs = instrument.custom_specs(["sideloadfix"], aliased=False)
     fixed = _launch_probe(app_id, bundle_id, decrypted, "sideload:sideloadfix", slf_specs, sign_env, secs,
-                          entshim=entshim)
+                          entshim=entshim, stop_check=stop_check)
 
-    c, f = control.survived, fixed.survived
-    if not control.built or not fixed.built:
-        verdict, note = "inconclusive", "Build failed; could not complete the probe."
-    elif c and f:
-        verdict, note = "no_detection", "Runs even with a plain re-sign — no sideload / anti-resign check."
-    elif (not c) and f:
-        verdict, note = "detected", "A plain re-sign is blocked but SideloadFix makes it run — the app detects sideloading."
-    elif (not c) and (not f):
-        verdict, note = "inconclusive", "Neither build stayed running — broken re-sign or anti-tamper SideloadFix can't defeat."
-    else:
-        verdict, note = "inconclusive", "Ran without SideloadFix but not with it — anomalous; re-run."
-
-    db.save_sideload_probe(app_id, verdict, note, c, f, control.crashed, fixed.crashed)
+    markers = _static_tamper_markers(db, app_id)
+    verdict, note, evidence = sideload_verdict(control, fixed, markers)
+    if entshim:
+        evidence["entshim"] = True
+    db.save_sideload_probe(app_id, verdict, note, control.survived, fixed.survived,
+                           control.crashed, fixed.crashed, evidence=evidence)
     log.info("[sideload] verdict=%s (%s)", verdict, note)
-    return {"verdict": verdict, "note": note, "control": control, "fixed": fixed}
+    return {"verdict": verdict, "note": note, "control": control, "fixed": fixed,
+            "evidence": evidence}
 
 
 def _resolve_bundle_id(db: Database, app_id: str, decrypted_ipa: str,
@@ -345,8 +543,18 @@ def _run_config_impl(app_id: str, bundle_id: str, decrypted_ipa: str, config: st
                      app_id, bundle_id)
     log.info("launching + driving app for %ss (capturing traffic%s) ...", secs,
              ", UI login" if creds else "")
-    dr = driver.drive(bundle_id, secs, login=bool(creds), prefer=prefer,
-                      stop_check=stop_check)
+    # Drive under a device syslog capture: CFNetwork / boringssl log every TLS
+    # rejection under the app's process name, which the proxy never sees.
+    exe_name = instrument.executable_name_from_ipa(decrypted_ipa)
+    box: dict = {}
+
+    def _drive():
+        box["dr"] = driver.drive(bundle_id, secs, login=bool(creds), prefer=prefer,
+                                 stop_check=stop_check)
+    syslog_text = device.capture_syslog(during=_drive, grep="")
+    if "dr" not in box:   # capture helper bailed before driving (should not happen)
+        _drive()
+    dr = box["dr"]
 
     safe = config.replace(":", "_")
     har_path = CONFIG.paths.results_dir / f"{app_id}_{safe}.har"
@@ -363,8 +571,17 @@ def _run_config_impl(app_id: str, bundle_id: str, decrypted_ipa: str, config: st
         log.warning("  HAR export failed (no file); treating as no decrypted traffic")
     har = capture.load_har(har_path)
     flows = capture.har_to_flows(har, CONFIG.test_device.client_ip)
-    hosts = capture.app_hosts(flows)
+    hosts = capture.app_hosts(flows)                 # TLS hosts only (https/wss)
+    clear = capture.cleartext_hosts(flows)
     reached = capture.reached_any_network(flows)   # non-excluded hosts only
+    rej = capture.tls_rejections(syslog_text or "", {exe_name} if exe_name else None)
+    if rej["rejected"] or rej["cancelled"]:
+        log.info("  device syslog: %d TLS rejection(s), %d challenge cancellation(s) by %s%s",
+                 rej["rejected"], rej["cancelled"], exe_name or "the app",
+                 (" on " + ", ".join(rej["hosts"][:4])) if rej["hosts"] else "")
+    if clear:
+        log.info("  %d cleartext host(s) (not evidence about pinning): %s",
+                 len(clear), ", ".join(sorted(clear)[:4]))
 
     # Native session: per-host TLS outcome, including undecrypted tunnels.
     conn_outcomes: dict = {}
@@ -410,13 +627,17 @@ def _run_config_impl(app_id: str, bundle_id: str, decrypted_ipa: str, config: st
     return ConfigRun(config, ran=dr.launched and not effective_crashed, crashed=effective_crashed,
                      crash_class=crash_class, hosts=hosts, reached_network=reached,
                      login_status=dr.login_status, crash_report=dr.crash_report,
-                     conn_outcomes=conn_outcomes, flows=flows)
+                     conn_outcomes=conn_outcomes, flows=flows,
+                     tls_rejections=rej, cleartext_hosts=clear)
 
 
 # Catalog ids that actually defeat pinning / hooks. Injecting only helper dylibs
 # (sideloadfix, entshim, attest) is NOT a bypass, so traffic seen with only those
-# loaded means the host was never pinned.
-BYPASS_DYLIB_IDS = frozenset({"ssks", "frida", "evasion"})
+# loaded means the host was never pinned. The Frida gadget is instrumentation:
+# without a pinning script loaded through it (none is, yet) it bypasses
+# nothing, so a gadget-only run can neither prove nor disprove pinning.
+BYPASS_DYLIB_IDS = frozenset({"ssks", "evasion"})
+INSTRUMENT_ONLY_IDS = frozenset({"frida"})
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_:.,-]+$")
 
 
@@ -444,15 +665,25 @@ def custom_outcome(run: ConfigRun, dylib_ids: list[str]) -> tuple[Outcome, Bypas
     includes a real bypass dylib may be graded BYPASSED; traffic seen with only
     helper dylibs loaded means NOT_PINNED."""
     has_bypass = any(x in BYPASS_DYLIB_IDS for x in dylib_ids)
+    gadget_only = (not has_bypass) and any(x in INSTRUMENT_ONLY_IDS for x in dylib_ids)
     if run.hosts:
         if has_bypass:
-            return Outcome.BYPASSED, BypassStage.DYLIB, True, WorkState.POSITIVE
+            # One run, no baseline: traffic under a bypass is 'bypassed' only
+            # in the sense that it is visible; whether it was pinned is not
+            # known. Flagged pinned=False so aggregates are not inflated.
+            return Outcome.BYPASSED, BypassStage.DYLIB, False, WorkState.POSITIVE
+        if gadget_only:
+            return Outcome.INCONCLUSIVE, BypassStage.NONE, False, WorkState.UNTESTED
+        if run.rejected:
+            # Visible hosts AND the app rejected our CA for others: pinned
+            # endpoints exist and nothing was bypassed.
+            return Outcome.PINNED_UNBYPASSED, BypassStage.NONE, True, WorkState.DONE_NEGATIVE
         return Outcome.NOT_PINNED, BypassStage.NONE, False, WorkState.DONE_NEGATIVE
     stage = BypassStage.DYLIB if has_bypass else BypassStage.NONE
     if run.crashed:
         return Outcome.TAMPER_DETECTED, stage, False, WorkState.UNTESTED
-    if run.reached_network:
-        return Outcome.PINNED_UNBYPASSED, stage, has_bypass, WorkState.UNTESTED
+    if run.reached_network or run.rejected:
+        return Outcome.PINNED_UNBYPASSED, stage, bool(run.rejected) or has_bypass, WorkState.UNTESTED
     return Outcome.INCONCLUSIVE, stage, False, WorkState.UNTESTED
 
 
@@ -561,63 +792,140 @@ def detect_pinning(db: Database, row, driver: device.UIDriver,
                 "reliable": False, "crashed": False, "crashed_bypass": True,
                 "clean_reached": clean.reached_network, "bypass_reached": byp.reached_network}
 
-    # A clean run that crashed gives no baseline -> the open/bypassable split
-    # would be all false positives. Only trust that split if it launched.
     reliable = clean.ran and not clean.crashed
-    byp_conn = byp.conn_outcomes or {}
-    decrypted = byp.hosts | clean.hosts
-
-    # Tier 3: hosts the app reached whose TLS aborted against our cert even with
-    # SSL Kill Switch loaded -> pinning our MITM could not break. Direct signal
-    # from the bypass run's connection traces, so it stands on its own.
-    hard_pinned = sorted(h for h, o in byp_conn.items()
-                         if o == "pinned" and h not in decrypted)
-    # Endpoints that never resolved (dead / sinkholed) -- reported, not pinned.
-    unresolved = sorted(h for h, o in byp_conn.items()
-                        if o == "unresolved" and h not in decrypted
-                        and h not in hard_pinned)
-
-    # Tier 1/2: among endpoints we DID decrypt, which needed the bypass?
-    bypassable = sorted(byp.hosts - clean.hosts)          # decrypt only w/ SSKS
-    both = sorted(byp.hosts & clean.hosts)                # decrypt either way
-    clean_only = sorted(clean.hosts - byp.hosts)          # decrypt w/o bypass
-
-    diff_verdict = "pinned" if reliable else "uncertain"
-    for h in bypassable:
-        db.add_pinning_probe(app_id, h, diff_verdict, seen_bypass=True, seen_clean=False)
-    for h in both:
-        db.add_pinning_probe(app_id, h, "not_pinned", seen_bypass=True, seen_clean=True)
-    for h in clean_only:
-        db.add_pinning_probe(app_id, h, "not_pinned", seen_bypass=False, seen_clean=True)
-    for h in hard_pinned:
-        db.add_pinning_probe(app_id, h, "pinned_hard", seen_bypass=False, seen_clean=False)
-    for h in unresolved:
-        db.add_pinning_probe(app_id, h, "unresolved", seen_bypass=False, seen_clean=False)
+    res = classify_pinning_runs(clean, byp)
+    for h, (verdict, sb, sc) in sorted(res["probes"].items()):
+        db.add_pinning_probe(app_id, h, verdict, seen_bypass=sb, seen_clean=sc)
 
     if not reliable:
         log.warning("[pinning] clean run did not launch cleanly (crash=%s); "
                     "open/bypassable split is UNCERTAIN", clean.crashed)
-    log.info("[pinning] %d bypassable-pinned, %d hard-pinned, %d open, %d unresolved",
-             len(bypassable), len(hard_pinned), len(both), len(unresolved))
-    if bypassable:
-        log.info("[pinning] bypassable: %s", ", ".join(bypassable))
-    if hard_pinned:
-        log.info("[pinning] HARD-PINNED (bypass failed): %s", ", ".join(hard_pinned))
+    log.info("[pinning] %d bypassable-pinned (%d unverified), %d hard-pinned, %d upstream lead(s), "
+             "%d open, %d unresolved; CA rejections clean=%d bypass=%d",
+             len(res["pinned"]), len(res["unverified"]), len(res["hard_pinned"]),
+             len(res["leads"]), len(res["not_pinned"]), len(res["unresolved"]),
+             clean.rejected, byp.rejected)
+    if res["pinned"]:
+        log.info("[pinning] bypassable: %s", ", ".join(res["pinned"]))
+    if res["unverified"]:
+        log.info("[pinning] revealed only in the bypass window, never contacted at baseline "
+                 "(not counted as pinned): %s", ", ".join(res["unverified"]))
+    if res["hard_pinned"]:
+        log.info("[pinning] HARD-PINNED (app rejected our CA even with SSL Kill Switch): %s",
+                 ", ".join(res["hard_pinned"]))
+    if res["leads"]:
+        log.info("[pinning] upstream TLS failures (lead only, confirm manually): %s",
+                 ", ".join(res["leads"]))
 
-    # Reflect the probe in the app's outcome.
-    if hard_pinned:
-        db.save_outcome(app_id, Outcome.PINNED_UNBYPASSED, BypassStage.NONE, True, WorkState.DONE_NEGATIVE)
-    elif reliable and bypassable:
-        db.save_outcome(app_id, Outcome.BYPASSED, BypassStage.DYLIB, True, WorkState.POSITIVE)
-    elif reliable and decrypted:
-        db.save_outcome(app_id, Outcome.NOT_PINNED, BypassStage.NONE, False, WorkState.DONE_NEGATIVE)
-    else:
-        db.save_outcome(app_id, Outcome.INCONCLUSIVE, BypassStage.NONE, False, WorkState.UNTESTED)
+    outcome, stage, pinned, state = res["outcome"]
+    db.save_outcome(app_id, outcome, stage, pinned, state)
+    log.info("[pinning] outcome: %s", outcome.value)
 
-    return {"pinned": bypassable, "hard_pinned": hard_pinned, "not_pinned": both,
-            "unresolved": unresolved, "reliable": reliable, "crashed": False,
-            "crashed_bypass": False,
+    return {"pinned": res["pinned"], "hard_pinned": res["hard_pinned"],
+            "not_pinned": res["not_pinned"], "unresolved": res["unresolved"],
+            "unverified": res["unverified"], "leads": res["leads"],
+            "rejections": {"clean": clean.rejected, "bypass": byp.rejected},
+            "outcome": outcome.value,
+            "reliable": reliable, "crashed": False, "crashed_bypass": False,
             "clean_reached": clean.reached_network, "bypass_reached": byp.reached_network}
+
+
+def pinning_verdict(reliable: bool, verified: int, unverified: int, open_hosts: int,
+                    hard_pinned: int, rejected_clean: int, rejected_bypass: int
+                    ) -> tuple[Outcome, BypassStage, bool, WorkState]:
+    """Pure app-level verdict for the two-run probe.
+
+    Evidence, strongest first:
+      hard_pinned / rejected_bypass : the app rejected our CA WITH the bypass
+                                      loaded (syslog, process-attributed).
+      verified                      : hosts that decrypted only under the bypass
+                                      AND were contacted at baseline (trace or
+                                      rejection), i.e. a real differential.
+      unverified                    : hosts first seen in the bypass window; a
+                                      rejection at baseline explains them,
+                                      otherwise they are window noise.
+      rejected_clean                : the app rejected our CA at baseline.
+      open_hosts                    : decrypted without any bypass.
+    Upstream-trace 'leads' never reach this function: they are not evidence."""
+    if hard_pinned or rejected_bypass:
+        if verified or (unverified and rejected_clean):
+            return Outcome.PARTIAL, BypassStage.DYLIB, True, WorkState.POSITIVE
+        return Outcome.PINNED_UNBYPASSED, BypassStage.NONE, True, WorkState.DONE_NEGATIVE
+    if not reliable:
+        return Outcome.INCONCLUSIVE, BypassStage.NONE, False, WorkState.UNTESTED
+    if verified or (unverified and rejected_clean):
+        return Outcome.BYPASSED, BypassStage.DYLIB, True, WorkState.POSITIVE
+    if rejected_clean:
+        # Rejected at baseline, but the bypass run neither revealed the host
+        # nor rejected: pinned, bypass unreproduced. Retry rather than guess.
+        return Outcome.INCONCLUSIVE, BypassStage.NONE, True, WorkState.UNTESTED
+    if open_hosts:
+        return Outcome.NOT_PINNED, BypassStage.NONE, False, WorkState.DONE_NEGATIVE
+    return Outcome.INCONCLUSIVE, BypassStage.NONE, False, WorkState.UNTESTED
+
+
+def classify_pinning_runs(clean: ConfigRun, byp: ConfigRun) -> dict:
+    """Pure per-host + app-level classification of the clean/bypass pair.
+    probes: host -> (verdict, seen_bypass, seen_clean) with verdicts
+      pinned        decrypted only under the bypass, contacted at baseline
+      unverified    decrypted only under the bypass, never contacted at baseline
+      uncertain     'pinned' shape but the baseline did not launch cleanly, or a
+                    baseline rejection the bypass run did not reproduce
+      not_pinned    decrypted without the bypass
+      pinned_hard   the app rejected our CA with the bypass loaded (syslog)
+      pinned_lead   upstream TLS failure in Proxyman's trace (weak, unattributed)
+      unresolved    never resolved in DNS (dead / sinkholed)"""
+    reliable = clean.ran and not clean.crashed
+    clean_traces = clean.conn_outcomes or {}
+    byp_conn = byp.conn_outcomes or {}
+    decrypted = byp.hosts | clean.hosts
+    bypassable = sorted(byp.hosts - clean.hosts)
+    both = sorted(byp.hosts & clean.hosts)
+    clean_only = sorted(clean.hosts - byp.hosts)
+    clean_rej_hosts = clean.rejected_hosts
+    byp_rej_hosts = byp.rejected_hosts
+
+    # A host that only appeared in the bypass window is a differential only if
+    # the baseline run actually contacted it (any trace outcome, or a logged
+    # rejection). Without a baseline trace export nothing can be verified, so
+    # the old behaviour (trust the diff) is kept.
+    if clean_traces:
+        verified = [h for h in bypassable if h in clean_traces or h in clean_rej_hosts]
+        unverified = [h for h in bypassable if h not in verified]
+    else:
+        verified, unverified = bypassable, []
+
+    hard_pinned = sorted(byp_rej_hosts - decrypted)
+    leads = sorted(h for h, o in byp_conn.items()
+                   if o == "pinned" and h not in decrypted and h not in hard_pinned)
+    unresolved = sorted(h for h, o in byp_conn.items()
+                        if o == "unresolved" and h not in decrypted
+                        and h not in hard_pinned and h not in leads)
+    rejected_only = sorted(clean_rej_hosts - decrypted - set(hard_pinned))
+
+    probes: dict[str, tuple[str, bool, bool]] = {}
+    for h in verified:
+        probes[h] = ("pinned" if reliable else "uncertain", True, False)
+    for h in unverified:
+        probes[h] = ("unverified", True, False)
+    for h in both:
+        probes[h] = ("not_pinned", True, True)
+    for h in clean_only:
+        probes[h] = ("not_pinned", False, True)
+    for h in hard_pinned:
+        probes[h] = ("pinned_hard", False, False)
+    for h in rejected_only:
+        probes[h] = ("uncertain", False, False)
+    for h in leads:
+        probes[h] = ("pinned_lead", False, False)
+    for h in unresolved:
+        probes[h] = ("unresolved", False, False)
+
+    outcome = pinning_verdict(reliable, len(verified), len(unverified), len(both) + len(clean_only),
+                              len(hard_pinned), clean.rejected, byp.rejected)
+    return {"pinned": verified, "unverified": unverified, "not_pinned": both + clean_only,
+            "hard_pinned": hard_pinned, "leads": leads, "unresolved": unresolved,
+            "rejected_only": rejected_only, "probes": probes, "outcome": outcome}
 
 
 def ladder_tail_inputs(runs: list) -> tuple[bool, bool, bool]:
@@ -650,13 +958,20 @@ def process_app(db: Database, row, driver: device.UIDriver, entshim: bool = Fals
     per_config: list[tuple[BypassStage, set[str]]] = []
     runs: list[ConfigRun] = []
 
-    # Stage 0: baseline, no bypass.
+    # Stage 0: baseline (SideloadFix only, no bypass). A crashed baseline is
+    # retried once so a flaky launch does not leave the ladder without one.
     s0 = run_config(app_id, bundle_id, decrypted, "stage0", driver, entshim=entshim,
                     stop_check=stop_check)
+    if s0.crashed and not (stop_check and stop_check()):
+        log.info("stage0 crashed; retrying the baseline once")
+        s0 = run_config(app_id, bundle_id, decrypted, "stage0", driver, entshim=entshim,
+                        stop_check=stop_check)
     runs.append(s0)
     db.add_dynamic_run(app_id, "stage0", "ran" if s0.ran else "fail",
                        s0.crash_class, len(s0.hosts), s0.login_status, log=s0.run_log)
-    if s0.hosts:
+    # Visible TLS traffic with no CA rejection anywhere: nothing is pinned. If
+    # the app rejected our CA for other endpoints, the ladder still runs.
+    if s0.hosts and not s0.rejected:
         db.save_outcome(app_id, Outcome.NOT_PINNED, BypassStage.NONE, False, WorkState.DONE_NEGATIVE)
         db.set_stage(app_id, Stage.DYNAMIC_DONE)
         return Outcome.NOT_PINNED
@@ -701,6 +1016,7 @@ def process_app(db: Database, row, driver: device.UIDriver, entshim: bool = Fals
     # Over bypass rungs only: a clean stage0 must not mask "every bypass crashed".
     all_crashed, any_ran, reached = ladder_tail_inputs(runs)
     login_completed = any(r.login_status in ("success", "not_needed") for r in runs)
+    login_attempted = any(r.login_status == "attempted" for r in runs)
 
     result = decide(OracleInput(
         stage0_app_hosts=s0.hosts,
@@ -708,8 +1024,10 @@ def process_app(db: Database, row, driver: device.UIDriver, entshim: bool = Fals
         all_configs_crashed=all_crashed,
         any_config_ran=any_ran,
         reached_any_network=reached,
-        login_required=False,
+        login_required=login_attempted and not login_completed,
         login_completed=login_completed,
+        stage0_crashed=s0.crashed,
+        baseline_tls_rejected=bool(s0.rejected),
     ))
     state = WorkState.POSITIVE if result.label in (Outcome.BYPASSED, Outcome.PARTIAL) \
         else WorkState.DONE_NEGATIVE if result.label in (

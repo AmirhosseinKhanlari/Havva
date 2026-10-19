@@ -254,7 +254,7 @@ def test_storage_scan_continues_past_unreadable_sqlite():
     assert any("not readable" in t for t in types)
     assert any("sensitive column" in t and "userPassword" in t for t in types)
     assert all(f["severity"] == "info" for f in findings if "not readable" in f["type"])
-    assert verdict_of(findings)[0] == "exposed"
+    assert verdict_of(findings)[0] == "credentials_exposed"   # userPassword column is a credential key
 
 
 def test_storage_sensitive_key_boundaries_and_email_noise():
@@ -266,8 +266,8 @@ def test_storage_sensitive_key_boundaries_and_email_noise():
         assert _SENSITIVE_KEY.search(ok), ok
     assert _find_email("logo@2x.png icon@3x %@.com") is None
     assert _find_email("reach me: real@example.org") == "real@example.org"
-    assert verdict_of([{"severity": "low"}])[0] == "review"
-    assert verdict_of([{"severity": "info"}])[0] == "review"
+    assert verdict_of([{"severity": "low"}])[0] == "data_only"
+    assert verdict_of([{"severity": "info"}])[0] == "data_only"
     assert verdict_of([])[0] == "clean"
 
 

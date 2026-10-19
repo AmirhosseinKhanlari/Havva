@@ -21,9 +21,102 @@ def test_native_pinning_needs_two_signals():
     assert two.pins_flag and two.pin_layer is PinLayer.L4_SECTRUST
 
 
-def test_boringssl_counts_as_native_pinning():
+def test_custom_boringssl_verifier_alone_is_not_pinning():
+    # A bundled BoringSSL (Flutter, gRPC) installs a custom verifier for its
+    # DEFAULT validation, and the word "boringssl" is in every such binary.
     p = classify(ExtractedApp(strings="SSL_set_custom_verify present"))
-    assert p.pins_flag and p.pin_layer is PinLayer.L4_SECTRUST
+    assert not p.pins_flag
+    fl = classify(ExtractedApp(frameworks=["Flutter.framework", "App.framework"],
+                               strings="third_party/boringssl/ssl/ssl_lib.cc"))
+    assert not fl.pins_flag and fl.tls_stack is TlsStack.FLUTTER
+    # ...but together with chain extraction it is native pinning.
+    p2 = classify(ExtractedApp(symbols="_SSL_set_custom_verify\n_SecTrustCopyPublicKey"))
+    assert p2.pins_flag and p2.pin_layer is PinLayer.L4_SECTRUST
+
+
+def test_native_tokens_are_whole_words():
+    # SecTrustEvaluateWithError must not also count as SecTrustEvaluate.
+    one = classify(ExtractedApp(symbols="U _SecTrustEvaluateWithError"))
+    assert not one.pins_flag
+    # Ordinary trust evaluation (what every TLS client does) is not pinning.
+    plain = classify(ExtractedApp(symbols="U _SecTrustEvaluateWithError\nU _SecPolicyCreateSSL"))
+    assert not plain.pins_flag
+    # Chain extraction + an evaluate call in the MAIN binary is.
+    pin = classify(ExtractedApp(main_symbols="U _SecCertificateCopyData\nU _SecTrustEvaluateWithError"))
+    assert pin.pins_flag and pin.pin_layer is PinLayer.L4_SECTRUST
+    # One strong token + pinned material (bundled cert or SPKI hash) also is.
+    mat = classify(ExtractedApp(main_symbols="U _SecTrustCopyPublicKey", cert_files=["api.der"]))
+    assert mat.pins_flag and "cert:api.der" in mat.matched_patterns["pin:native"]
+    spki = classify(ExtractedApp(main_symbols="U _SecTrustCopyPublicKey",
+                                 main_strings="sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+    assert spki.pins_flag and spki.matched_patterns["spki_hashes"]
+
+
+def test_native_tokens_only_in_frameworks_are_a_candidate():
+    app = ExtractedApp(main_symbols="nothing here",
+                       symbols="nothing here\nU _SecTrustCopyPublicKey\nU _SecTrustEvaluate")
+    p = classify(app)
+    assert not p.pins_flag
+    assert "pin_candidate:native_framework" in p.matched_patterns
+
+
+def test_delegate_pair_needs_material_and_is_whole_word():
+    # NSURLAuthenticationMethodServerTrust must not also count as serverTrust.
+    one = classify(ExtractedApp(strings="NSURLAuthenticationMethodServerTrust"))
+    assert not one.pins_flag
+    pair = classify(ExtractedApp(
+        strings="URLSession:didReceiveChallenge:completionHandler:\nNSURLAuthenticationMethodServerTrust"))
+    assert not pair.pins_flag
+    assert "pin_candidate:delegate" in pair.matched_patterns
+    with_cert = classify(ExtractedApp(
+        strings="URLSession:didReceiveChallenge:completionHandler:\nserverTrust",
+        cert_files=["Certs/api.cer"]))
+    assert with_cert.pins_flag and with_cert.pin_layer is PinLayer.L2_DELEGATE
+
+
+def test_datadome_is_not_a_pinning_library():
+    assert not classify(ExtractedApp(strings="DataDomeSDK")).pins_flag
+
+
+def test_braintree_pin_scope_is_sdk_gateway():
+    bt = classify(ExtractedApp(strings="_TtC13BraintreeCore23BTAPIPinnedCertificates"))
+    assert bt.matched_patterns["pin_scope"] == ["sdk-gateway"]
+
+
+def test_ats_pinned_domains_must_be_non_empty_and_outrank_native():
+    empty = classify(ExtractedApp(info_plist={"NSAppTransportSecurity": {"NSPinnedDomains": {}}}))
+    assert not empty.pins_flag
+    both = classify(ExtractedApp(
+        info_plist={"NSAppTransportSecurity": {"NSPinnedDomains": {"api.example.com": {}}}},
+        main_symbols="U _SecTrustCopyPublicKey\nU _SecTrustEvaluate"))
+    assert both.pin_layer is PinLayer.L1_ATS
+    assert both.matched_patterns["pin:ats"] == ["api.example.com"]
+
+
+def test_trustkit_plist_enforcement_split():
+    from datetime import date
+    from pipeline.static_classify import trustkit_config
+    plist = {"TSKConfiguration": {"TSKPinnedDomains": {
+        "api.example.com": {"TSKPublicKeyHashes": ["x"]},
+        "cdn.example.com": {"TSKEnforcePinning": False},
+        "old.example.com": {"TSKExpirationDate": "2020-01-01"},
+    }}}
+    tk = trustkit_config(plist, today=date(2026, 10, 18))
+    assert tk["enforced"] == ["api.example.com"]
+    assert tk["report_only"] == ["cdn.example.com"]
+    assert tk["expired"] == ["old.example.com"]
+    assert trustkit_config({}) is None
+
+    p = classify(ExtractedApp(symbols="TrustKit", info_plist=plist))
+    assert p.pins_flag and p.pin_library == "TrustKit"
+    assert p.matched_patterns["trustkit_enforce"] == ["partial"]
+    ro = classify(ExtractedApp(symbols="TrustKit", info_plist={"TSKConfiguration": {
+        "TSKPinnedDomains": {"api.example.com": {"TSKEnforcePinning": False}}}}))
+    assert ro.pins_flag  # adopted...
+    assert ro.matched_patterns["trustkit_enforce"] == ["none"]  # ...not enforced
+    assert ro.matched_patterns["pin_layer_detail"] == ["l3_library_trustkit_report_only"]
+    code = classify(ExtractedApp(symbols="TrustKit"))
+    assert code.matched_patterns["trustkit_enforce"] == ["unknown"]
 
 
 def test_ats_nspinned_domains():

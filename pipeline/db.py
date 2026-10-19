@@ -263,6 +263,7 @@ class Database:
                           ("iap", "TEXT")):
             self.add_column_if_missing("analysis", col, decl)
         self.add_column_if_missing("static_profile", "appattest_level", "TEXT DEFAULT 'none'")
+        self.add_column_if_missing("sideload_probe", "evidence", "TEXT")   # JSON, see dynamic.sideload_verdict
         self.add_column_if_missing("dynamic_runs", "log", "TEXT DEFAULT ''")
         # acquisition work-queue bookkeeping: retry budget + last transient error
         self.add_column_if_missing("acquisition", "attempts", "INTEGER DEFAULT 0")
@@ -555,20 +556,22 @@ class Database:
 
     def save_sideload_probe(self, app_id: str, verdict: str, note: str,
                             control_alive: bool, fix_alive: bool,
-                            control_crashed: bool, fix_crashed: bool) -> None:
+                            control_crashed: bool, fix_crashed: bool,
+                            evidence: dict | None = None) -> None:
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO sideload_probe
                    (app_id, verdict, note, control_alive, fix_alive,
-                    control_crashed, fix_crashed, probed_at)
-                   VALUES (?,?,?,?,?,?,?,?)
+                    control_crashed, fix_crashed, probed_at, evidence)
+                   VALUES (?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(app_id) DO UPDATE SET
                      verdict=excluded.verdict, note=excluded.note,
                      control_alive=excluded.control_alive, fix_alive=excluded.fix_alive,
                      control_crashed=excluded.control_crashed, fix_crashed=excluded.fix_crashed,
-                     probed_at=excluded.probed_at""",
+                     probed_at=excluded.probed_at, evidence=excluded.evidence""",
                 (app_id, verdict, note, int(control_alive), int(fix_alive),
-                 int(control_crashed), int(fix_crashed), _now()),
+                 int(control_crashed), int(fix_crashed), _now(),
+                 json.dumps(evidence) if evidence is not None else None),
             )
 
     def get_sideload_probe(self, app_id: str):

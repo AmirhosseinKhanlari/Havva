@@ -42,6 +42,12 @@
     [self obs_generateAssertion:keyId clientDataHash:h completionHandler:ch];
 }
 
+- (BOOL)obs_isSupported {
+    BOOL r = [self obs_isSupported];
+    MARK(@"CALL DCAppAttestService isSupported=%d", (int)r);
+    return r;
+}
+
 - (void)obs_generateTokenWithCompletionHandler:(id)ch {
     MARK(@"CALL DCDevice generateToken");
     [self obs_generateTokenWithCompletionHandler:ch];
@@ -90,6 +96,7 @@ static BOOL installHooks(void) {
                          @selector(obs_attestKey:clientDataHash:completionHandler:));
         swizzleAndVerify(attest, @selector(generateAssertion:clientDataHash:completionHandler:),
                          @selector(obs_generateAssertion:clientDataHash:completionHandler:));
+        swizzleAndVerify(attest, @selector(isSupported), @selector(obs_isSupported));
     }
     if (dcdev) {
         g_dcdevInstalled = YES;

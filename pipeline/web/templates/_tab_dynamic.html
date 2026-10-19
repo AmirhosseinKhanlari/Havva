@@ -82,6 +82,8 @@
   {% set open_hosts = pinning|selectattr('verdict','equalto','not_pinned')|list %}
   {% set uncertain_hosts = pinning|selectattr('verdict','equalto','uncertain')|list %}
   {% set dead_hosts = pinning|selectattr('verdict','equalto','unresolved')|list %}
+  {% set lead_hosts = pinning|selectattr('verdict','equalto','pinned_lead')|list %}
+  {% set unverified_hosts = pinning|selectattr('verdict','equalto','unverified')|list %}
   <details class="glass sm pin-details" style="overflow:hidden" {% if pinned_hosts or hard_hosts %}open{% endif %}>
     <summary style="padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer">
       <span class="cchev" aria-hidden="true">›</span>
@@ -89,35 +91,51 @@
       {% if hard_hosts %}<span style="font-size:12px;font-weight:700;color:var(--bad)">{{ hard_hosts|length }} hard-pinned</span>{% endif %}
       {% if pinned_hosts %}<span style="font-size:12px;font-weight:700;color:var(--warn)">{{ pinned_hosts|length }} pinned</span>{% endif %}
       <span style="font-size:12px;font-weight:700;color:var(--ok)">{{ open_hosts|length }} not pinned</span>
+      {% if lead_hosts %}<span class="muted" style="font-size:12px">{{ lead_hosts|length }} lead{{ 's' if lead_hosts|length != 1 }}</span>{% endif %}
+      {% if unverified_hosts %}<span class="muted" style="font-size:12px">{{ unverified_hosts|length }} unverified</span>{% endif %}
     </summary>
     <div class="muted" style="padding:2px 16px 10px;font-size:10.5px;display:flex;gap:14px;flex-wrap:wrap">
       <span>👁️ not pinned (traffic visible)</span>
       <span>🔒 pinned (bypass worked)</span>
-      <span>🛡️ hard-pinned (bypass failed)</span>
+      <span>🛡️ hard-pinned (app rejected our CA even with the bypass)</span>
+      <span>🧭 lead (upstream TLS failure, unconfirmed)</span>
+      <span>🌫️ unverified (seen only in the bypass window)</span>
     </div>
     {% for p in pinning %}
     {% set v = p['verdict'] %}
     <div style="display:flex;align-items:center;gap:13px;padding:11px 16px;border-top:1px solid var(--hair);font-size:13px">
       <span style="font-size:20px;line-height:1;width:24px;text-align:center;flex:none">
-      {%- if v == 'pinned_hard' %}<span title="Pinned - bypass failed">🛡️</span>
+      {%- if v == 'pinned_hard' %}<span title="Pinned - the app rejected our CA with SSL Kill Switch loaded (device syslog)">🛡️</span>
       {%- elif v == 'pinned' %}<span title="Pinned - bypassed by SSL Kill Switch">🔒</span>
+      {%- elif v == 'pinned_lead' %}<span title="Lead - Proxyman's upstream TLS failed; not attributed to the app">🧭</span>
+      {%- elif v == 'unverified' %}<span title="Seen only in the bypass window; never contacted at baseline">🌫️</span>
       {%- elif v == 'uncertain' %}<span title="Uncertain" style="color:var(--warn)">❓</span>
       {%- elif v == 'unresolved' %}<span title="Did not resolve" style="color:var(--muted-fg,#888)">✖️</span>
       {%- else %}<span title="Not pinned - traffic visible">👁️</span>{% endif -%}
       </span>
       <span style="flex:1;font-weight:600;word-break:break-all;{% if v=='unresolved' %}opacity:.6{% endif %}">{{ p['host'] }}</span>
-      <span class="pill small" style="{% if v=='pinned_hard' %}color:var(--bad){% elif v=='pinned' %}color:var(--warn){% elif v=='uncertain' %}color:var(--warn){% elif v=='unresolved' %}color:var(--muted-fg,#888){% else %}color:var(--ok){% endif %}">
-        {% if v=='pinned_hard' %}HARD-PINNED{% elif v=='pinned' %}PINNED{% elif v=='uncertain' %}UNCERTAIN{% elif v=='unresolved' %}no DNS{% else %}not pinned{% endif %}</span>
+      <span class="pill small" style="{% if v=='pinned_hard' %}color:var(--bad){% elif v=='pinned' %}color:var(--warn){% elif v in ('uncertain','pinned_lead','unverified') %}color:var(--warn){% elif v=='unresolved' %}color:var(--muted-fg,#888){% else %}color:var(--ok){% endif %}">
+        {% if v=='pinned_hard' %}HARD-PINNED{% elif v=='pinned' %}PINNED{% elif v=='pinned_lead' %}LEAD{% elif v=='unverified' %}UNVERIFIED{% elif v=='uncertain' %}UNCERTAIN{% elif v=='unresolved' %}no DNS{% else %}not pinned{% endif %}</span>
     </div>
     {% endfor %}
     {% if hard_hosts %}
     <div class="muted" style="padding:9px 16px;border-top:1px solid var(--hair);font-size:11px">
-      Hard-pinned: the app reached these but tore down TLS against our certificate even with SSL Kill Switch loaded — pinning our MITM could not break (custom pinning / statically-linked TLS).
+      Hard-pinned: the device syslog shows this app's process rejecting our certificate (CFNetwork -1202/-1200, boringssl verify failure) even with SSL Kill Switch loaded. Pinning our MITM could not break: hand-rolled key comparison or a statically linked TLS stack.
+    </div>
+    {% endif %}
+    {% if lead_hosts %}
+    <div class="muted" style="padding:9px 16px;border-top:1px solid var(--hair);font-size:11px">
+      Lead: Proxyman's upstream TLS to this host failed. That is the Mac-to-origin leg with no client attribution (mTLS, origin fingerprinting, another process), so it is not counted in the verdict. Confirm by hand.
+    </div>
+    {% endif %}
+    {% if unverified_hosts %}
+    <div class="muted" style="padding:9px 16px;border-top:1px solid var(--hair);font-size:11px">
+      Unverified: decrypted only in the bypass run, but the baseline run never contacted the host at all (no connection trace, no rejection), so this is window-to-window traffic variation, not evidence of pinning. Not counted.
     </div>
     {% endif %}
     {% if uncertain_hosts %}
     <div class="muted" style="padding:9px 16px;border-top:1px solid var(--hair);font-size:11px">
-      Uncertain: the clean baseline run did not launch cleanly, so the open/bypassed split could not be confirmed. Re-run the probe.
+      Uncertain: either the clean baseline did not launch cleanly, or the app rejected our certificate at baseline and the bypass run did not reproduce it. Re-run the probe.
     </div>
     {% endif %}
   </details>
@@ -151,7 +169,7 @@
       <span style="font-size:16px">🪪</span>
       <div style="flex:1">
         <div style="font-size:14px;font-weight:700">Detect sideload / anti-resign</div>
-        <div class="muted" style="font-size:11.5px">Launches a plain re-sign (control) then a SideloadFix build and compares whether each stays running. If only the SideloadFix build survives, the app detects sideloading.</div>
+        <div class="muted" style="font-size:11.5px">Launches a plain re-sign (control) then a SideloadFix build, polling liveness for the window and keeping each crash reason. SideloadFix only papers over keychain access groups, app-group containers and bundle identity, so "blocked then recovered" is graded as an anti-resign check only when the crash message or a shipped integrity SDK says so; otherwise it is re-sign fragility.</div>
       </div>
     </div>
     <form hx-post="/app/{{ app_id }}/dynamic/sideload" hx-target="#dyn-action" hx-swap="innerHTML"
@@ -166,9 +184,15 @@
   {% if sideload %}
   {% set sv = sideload['verdict'] %}
   {% set SL = {
-    'detected':     ['🛡️','Detects sideloading','A plain re-sign is blocked; SideloadFix is required to run. The app has an anti-resign / sideload check.','var(--warn)','rgba(255,159,10,.14)'],
-    'no_detection': ['✅','No sideload detection','The app runs even with a plain re-sign — no anti-resign check (SideloadFix not needed).','var(--ok)','rgba(48,209,150,.14)'],
-    'inconclusive': ['❓','Inconclusive','Could not decide — see the note. Re-run, or check build/install.','var(--ink2)','var(--field)'],
+    'anti_resign':             ['🛡️','Anti-resign check','A plain re-sign is blocked and the crash message or a shipped integrity SDK shows an intentional check. SideloadFix defeats it.','var(--warn)','rgba(255,159,10,.14)'],
+    'anti_resign_unrecovered': ['🛡️','Anti-resign check (not defeated)','Both builds are blocked and the evidence shows an intentional integrity check that SideloadFix cannot paper over.','var(--bad)','rgba(255,69,58,.14)'],
+    'resign_fragile':          ['🧩','Re-sign fragile (recoverable)','Crashes when re-signed under another team, recovers once SideloadFix papers over keychain access groups, app-group containers and bundle identity. Nothing names an intentional check: most likely a missing entitlement, not anti-tamper.','var(--ink2)','var(--field)'],
+    'no_detection':            ['✅','No anti-resign check','The app runs with a plain re-sign: no check and no re-sign fragility.','var(--ok)','rgba(48,209,150,.14)'],
+    'resign_broken':           ['🔧','Re-sign broken','The kernel killed both builds for an invalid code signature. Our build, not the app. Check the signing identity and profile.','var(--bad)','rgba(255,69,58,.14)'],
+    'entitlement_crash':       ['🪪','Entitlement crash','Both builds die on an entitlement the re-sign stripped. Re-run with the entitlement shim enabled.','var(--warn)','rgba(255,159,10,.14)'],
+    'blocked_unrecovered':     ['⛔','Blocked, cause unknown','Neither build stayed running and the crash evidence does not say why. Inspect the crash reason below.','var(--bad)','rgba(255,69,58,.14)'],
+    'detected':                ['🛡️','Blocked, recovered by SideloadFix (legacy label)','Recorded before crash evidence was graded: re-run to separate re-sign fragility from an intentional check.','var(--warn)','rgba(255,159,10,.14)'],
+    'inconclusive':            ['❓','Inconclusive','A tooling gap on one arm (build, install, launch or liveness), or an anomalous pair. Re-run.','var(--ink2)','var(--field)'],
   } %}
   {% set s = SL.get(sv, ['•', sv|replace('_',' ')|title, sideload['note'], 'var(--ink)', 'var(--field)']) %}
   <div class="glass sm" style="padding:16px 18px">
@@ -179,9 +203,19 @@
         <div style="font-size:17px;font-weight:800;color:{{ s[3] }};margin-top:1px">{{ s[1] }}</div>
         <div class="muted" style="font-size:12.5px;line-height:1.55;margin-top:4px">{{ sideload['note'] or s[2] }}</div>
         <div class="muted" style="font-size:11px;margin-top:8px;display:flex;gap:16px;flex-wrap:wrap">
-          <span>plain re-sign: {{ 'ran' if sideload['control_alive'] else 'blocked' }}{% if sideload['control_crashed'] %} (crash){% endif %}</span>
-          <span>+SideloadFix: {{ 'ran' if sideload['fix_alive'] else 'blocked' }}{% if sideload['fix_crashed'] %} (crash){% endif %}</span>
+          {% set ec = sideload_evidence.get('control', {}) if sideload_evidence else {} %}
+          {% set ef = sideload_evidence.get('fixed', {}) if sideload_evidence else {} %}
+          <span>plain re-sign: {{ ec.get('status') or ('ran' if sideload['control_alive'] else 'blocked') }}{% if sideload['control_crashed'] %} (crash{% if ec.get('crash_class') and ec.get('crash_class') != 'none' %}: {{ ec['crash_class'] }}{% endif %}){% endif %}</span>
+          <span>+SideloadFix: {{ ef.get('status') or ('ran' if sideload['fix_alive'] else 'blocked') }}{% if sideload['fix_crashed'] %} (crash{% if ef.get('crash_class') and ef.get('crash_class') != 'none' %}: {{ ef['crash_class'] }}{% endif %}){% endif %}</span>
+          {% if sideload_evidence and sideload_evidence.get('entshim') %}<span>entitlement shim was injected in BOTH arms (control is not plain for image-enumerating apps)</span>{% endif %}
         </div>
+        {% if ec.get('reason') or ef.get('reason') %}
+        <div class="muted" style="font-size:11px;margin-top:6px;word-break:break-word">
+          {% if ec.get('reason') %}<div>control: <code>{{ ec['reason'][:200] }}</code>{% if ec.get('intent') %} <span class="pill small">{{ ec['intent'] }}</span>{% endif %}</div>{% endif %}
+          {% if ef.get('reason') %}<div>SideloadFix: <code>{{ ef['reason'][:200] }}</code>{% if ef.get('intent') %} <span class="pill small">{{ ef['intent'] }}</span>{% endif %}</div>{% endif %}
+          {% if sideload_evidence.get('static_markers') %}<div>static integrity markers: {{ sideload_evidence['static_markers']|join(', ') }}</div>{% endif %}
+        </div>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -192,7 +226,7 @@
       <span style="font-size:16px">🗄️</span>
       <div style="flex:1">
         <div style="font-size:14px;font-weight:700">Inspect data storage</div>
-        <div class="muted" style="font-size:11.5px">Runs the app, pulls its container from the device and scans the unencrypted stores (NSUserDefaults, SQLite/Core Data, Realm, cookies, keyboard cache) for secrets and sensitive values. Use Development signing for full-container access.</div>
+        <div class="muted" style="font-size:11.5px">Drives the app (through login if enabled) with StorageObserver injected, which logs every container file's Data Protection class and the app's Keychain items (accessibility only, never values). Then pulls the container and scans NSUserDefaults, SQLite/Core Data (WAL applied), Realm, cookies and caches for credentials, tokens and PII. Use Development signing for full-container access.</div>
       </div>
     </div>
     <form hx-post="/app/{{ app_id }}/dynamic/storage" hx-target="#dyn-action" hx-swap="innerHTML"
@@ -200,6 +234,11 @@
       {{ sign_env_select() }}
       {{ monitor_input() }}
       {{ entshim_toggle() }}
+      <label class="switch" style="margin-bottom:12px">
+        <input type="checkbox" name="login" id="storage-login">
+        <span class="track"><span class="thumb"></span></span>
+        <span style="font-size:12.5px">Enable UI login automation <span class="muted">(logs in via accounts.json first, so post-login writes exist)</span></span>
+      </label>
       <button class="pill primary">▶ Inspect data storage</button>
     </form>
   </div>
@@ -207,10 +246,14 @@
   {% if storage %}
   {% set stv = storage['verdict'] %}
   {% set STG = {
-    'exposed': ['🔓','Sensitive data exposed','Secrets or sensitive values were found sitting in an unencrypted store.','var(--bad)','rgba(255,69,58,.14)'],
-    'review':  ['🗂️','Unencrypted data stored','Unencrypted stores hold data but no clear secret matched. Review the items below.','var(--warn)','rgba(255,159,10,.14)'],
-    'clean':   ['✅','No exposed storage','No data was found in the inspected unencrypted stores.','var(--ok)','rgba(48,209,150,.14)'],
-    'inconclusive': ['❓','Inconclusive','Could not pull the container (use Development signing). Re-run.','var(--ink2)','var(--field)'],
+    'credentials_exposed': ['🔓','Credentials outside protected storage','A password, private key, live secret key, or an always-readable Keychain item was found. Items are listed below with their Data Protection class where known.','var(--bad)','rgba(255,69,58,.14)'],
+    'tokens_in_files':     ['🪙','Tokens stored in files','Session tokens, API keys or identifiers sit in files (NSUserDefaults / SQLite / cookies) instead of the Keychain.','var(--warn)','rgba(255,159,10,.14)'],
+    'pii_in_files':        ['📧','PII in files','E-mail addresses are stored in files; no credential or token matched.','var(--warn)','rgba(255,159,10,.14)'],
+    'data_only':           ['🗂️','Data stored, nothing sensitive matched','Files hold data but no credential, token or PII was matched. Review the items below.','var(--ink2)','var(--field)'],
+    'clean':               ['✅','Nothing stored','No data was found in the inspected stores.','var(--ok)','rgba(48,209,150,.14)'],
+    'exposed':             ['🔓','Sensitive data exposed (legacy label)','Recorded before tiered grading; re-run to regrade.','var(--bad)','rgba(255,69,58,.14)'],
+    'review':              ['🗂️','Data stored (legacy label)','Recorded before tiered grading; re-run to regrade.','var(--warn)','rgba(255,159,10,.14)'],
+    'inconclusive':        ['❓','Inconclusive','The app did not launch or the container could not be pulled; the note says why. Re-run.','var(--ink2)','var(--field)'],
   } %}
   {% set g = STG.get(stv, ['•', stv|replace('_',' ')|title, storage['note'], 'var(--ink)', 'var(--field)']) %}
   <div class="glass sm" style="overflow:hidden">
@@ -235,7 +278,7 @@
         <span class="pill small" style="flex:none;padding:1px 8px;font-size:10px;color:{{ 'var(--bad)' if f['severity']=='high' else 'var(--warn)' if f['severity']=='medium' else 'var(--ink3)' }}">{{ f['severity'] }}</span>
         <span style="flex:1;min-width:0">
           <span style="font-weight:600">{{ f['type'] }}</span>
-          <span class="muted" style="display:block;font-size:11px;word-break:break-all">{{ f['store'] }} · {{ f['file'] }}{% if f['detail'] %} · {{ f['detail'] }}{% endif %}</span>
+          <span class="muted" style="display:block;font-size:11px;word-break:break-all">{{ f['store'] }} · {{ f['file'] }}{% if f['detail'] %} · {{ f['detail'] }}{% endif %}{% if f.get('protection') %} · <span title="Data Protection class">{{ f['protection']|replace('NSFileProtection','') }}</span>{% endif %}</span>
         </span>
       </div>
       {% endfor %}

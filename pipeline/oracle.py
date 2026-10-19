@@ -39,6 +39,12 @@ class OracleInput:
     reached_any_network: bool = False
     login_required: bool = False
     login_completed: bool = False
+    # The baseline run crashed (even after a retry): there is no baseline, so a
+    # host first seen under a bypass cannot be attributed to pinning.
+    stage0_crashed: bool = False
+    # The device syslog shows the app rejecting our CA at baseline (process-
+    # attributed). Direct evidence of pinning, independent of host visibility.
+    baseline_tls_rejected: bool = False
 
 
 @dataclass
@@ -62,7 +68,16 @@ def decide(inp: OracleInput) -> OracleResult:
             cheapest = stage
             break
 
+    if inp.stage0_crashed and cheapest is not None:
+        # No baseline to diff against: the bypass build ran where the baseline
+        # did not, so what it shows cannot be credited to defeating pinning.
+        return OracleResult(Outcome.INCONCLUSIVE, pinned=False, bypass_cost=BypassStage.NONE)
+
     if baseline and cheapest is None:
+        if inp.baseline_tls_rejected:
+            # Some endpoints open, others rejected our CA, nothing revealed by
+            # the ladder: pinned endpoints exist and were not bypassed.
+            return OracleResult(Outcome.PINNED_UNBYPASSED, pinned=True, bypass_cost=BypassStage.NONE)
         # App talked without any bypass: it does not pin (those hosts).
         return OracleResult(Outcome.NOT_PINNED, pinned=False, bypass_cost=BypassStage.NONE)
 
@@ -79,8 +94,9 @@ def decide(inp: OracleInput) -> OracleResult:
         return OracleResult(Outcome.INCONCLUSIVE, pinned=False, bypass_cost=BypassStage.NONE)
     if inp.login_required and not inp.login_completed:
         return OracleResult(Outcome.INCONCLUSIVE, pinned=False, bypass_cost=BypassStage.NONE)
-    if not inp.reached_any_network:
-        # App ran but never tried to talk: we did not trigger it.
+    if not inp.reached_any_network and not inp.baseline_tls_rejected:
+        # App ran but never tried to talk: we did not trigger it. (A logged
+        # rejection IS an attempt to talk.)
         return OracleResult(Outcome.INCONCLUSIVE, pinned=False, bypass_cost=BypassStage.NONE)
     # App ran, tried the network, still nothing visible after the full ladder.
     return OracleResult(Outcome.PINNED_UNBYPASSED, pinned=True, bypass_cost=BypassStage.NONE)

@@ -161,6 +161,52 @@ def _classify_legacy(text: str) -> CrashClass | None:
     return None
 
 
+# Words in a crash reason that reveal WHY the app died. 'tamper' is evidence of
+# an intentional integrity check; 'entitlement' is the re-sign stripping an
+# entitlement (keychain group, app group, VSS...) which SideloadFix / the
+# entitlement shim paper over and which has no anti-tamper intent at all.
+_TAMPER_WORDS = ("tamper", "jailbr", "integrity", "sideload", "re-sign", "resign", "injected",
+                 "not from the app store", "piracy", "cracked", "modified app", "unauthorized",
+                 "hooked", "debugger")
+_ENTITLEMENT_WORDS = ("entitlement", "containerurl", "application-groups", "keychain-access-groups",
+                      "-34018", "errsecmissingentitlement", "access group", "provisioning profile",
+                      "securityapplicationgroupidentifier")
+
+
+def crash_reason(report: str) -> str:
+    """The human-readable reason out of a crash report: termination indicator,
+    exception type/subtype and the Additional Scenario Info for a modern .ips;
+    the 'reason'/'exception' lines for legacy text. Capped, never raises."""
+    if not report:
+        return ""
+    body = _load_ips(report)
+    if body is None:
+        lines = [l.strip() for l in report.splitlines()
+                 if any(k in l.lower() for k in ("reason", "exception", "terminat"))]
+        return " | ".join(lines)[:400]
+    term = body.get("termination") or {}
+    exc = body.get("exception") or {}
+    if not isinstance(term, dict):
+        term = {}
+    if not isinstance(exc, dict):
+        exc = {}
+    parts = [str(term.get("indicator") or term.get("reason") or ""),
+             str(exc.get("type") or ""), str(exc.get("subtype") or ""),
+             _asi_text(body)]
+    return " | ".join(p for p in parts if p)[:400]
+
+
+def crash_intent(reason: str) -> str:
+    """'tamper' | 'entitlement' | '' from a crash reason. Tamper wins when both
+    appear (an integrity check that mentions entitlements is still a check)."""
+    low = (reason or "").lower()
+    if any(w in low for w in _TAMPER_WORDS):
+        return "tamper"
+    if any(w in low for w in _ENTITLEMENT_WORDS):
+        return "entitlement"
+    return ""
+
+
 def classify_crash(report: str, launched: bool, produced_network: bool) -> CrashClass:
     """Classify a crash from its report text plus two observed facts.
 
@@ -212,5 +258,8 @@ FULL_LADDER: list[BypassStage] = [
 
 
 def is_manual_tail(stage: BypassStage) -> bool:
-    """Binary patching is the only rung that does not fully automate."""
-    return stage == BypassStage.BINARY_PATCH
+    """Rungs the pipeline cannot run unattended. Binary patching never
+    automates. The Frida rung injects a bare gadget and no pinning script is
+    driven through it yet, so unattended it bypasses nothing: queued for a
+    manual session rather than graded as if it had run."""
+    return stage in (BypassStage.BINARY_PATCH, BypassStage.FRIDA)
