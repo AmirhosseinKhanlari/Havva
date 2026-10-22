@@ -1,10 +1,25 @@
-<p align="center">
-  <h1 align="center">Havva</h1>
-  <p align="center"><b>At-scale measurement of iOS client-integrity defenses: do they merely exist, or do they actually hold?</b></p>
-  <p align="center">
-    <code>SSL pinning</code> · <code>App Attest / DeviceCheck</code> · <code>in-app purchase validation</code> · <code>sideload / anti-tamper</code> · <code>App Transport Security</code> · <code>on-device storage</code> · <code>SBOM + CVEs</code>
-  </p>
-</p>
+<div align="center">
+
+<img src="docs/assets/havva-mark.svg" width="88" alt="Havva logo">
+
+# Havva
+
+**At-scale measurement of iOS client-integrity defenses: do they merely exist, or do they actually hold?**
+
+![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white) ![Console](https://img.shields.io/badge/console-FastAPI%20%2B%20HTMX-009688?logo=fastapi&logoColor=white) ![Devices](https://img.shields.io/badge/runs%20on-real%20iPhones-111111?logo=apple&logoColor=white) ![Tests](https://img.shields.io/badge/tests-396%20passing-2ea44f?logo=pytest&logoColor=white) ![Status](https://img.shields.io/badge/status-research%20prototype-7c3aed)
+
+<code>SSL pinning</code> · <code>App Attest / DeviceCheck</code> · <code>in-app purchase validation</code> · <code>sideload / anti-tamper</code> · <code>App Transport Security</code> · <code>on-device storage</code> · <code>SBOM + CVEs</code>
+
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-dark.webp">
+  <img alt="The Havva console: corpus funnel, device health, one-click pipeline phases and live jobs" src="docs/screenshots/dashboard-light.webp" width="920">
+</picture>
+
+<sub>The screenshot follows your GitHub theme. Wherever a screenshot shows per-app measurement results, app names and hostnames are blurred: those results are unpublished research data.</sub>
+
+</div>
 
 ---
 
@@ -14,8 +29,87 @@ The central thesis the tool is built around: **presence is not effectiveness.** 
 
 A FastAPI + HTMX console ("Havva" proper) sits on top of the whole thing so a run can be started, watched live, stopped, and browsed from a phone on the same Wi-Fi.
 
+## Highlights
+
+- **Verdicts, not keyword hits.** Every defense is graded effective, present-but-ineffective, absent or inconclusive, and every grade points at the evidence behind it.
+- **Real hardware, end to end.** A jailbroken iPhone 8 handles decryption and a stock iPhone XR does the measuring, so jailbreak detection never contaminates a verdict.
+- **Offline FairPlay decryption (new).** Downloaded IPAs are decrypted on the Mac in seconds from one credential per Apple account. The install, launch and dump round trip on the device is now only a fallback.
+- **Hands-off logins.** An accessibility-tree navigator, a text-only LLM fallback and SMS one-time-code retrieval get apps past onboarding and sign-in without per-app scripts.
+- **An App Attest enforcement battery.** Omit, tamper, bind, replay, noreg and downgrade probes, each graded against a baseline that proves the endpoint really serves gated data.
+- **A live console and seeded studies.** Start any phase from the browser, watch color-coded logs stream in, and run reproducible random-sample campaigns with live statistics.
+
+## A look inside
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/static-analysis-dark.webp">
+        <img src="docs/screenshots/static-analysis-light.webp" alt="Static tab: certificate pinning detected, with the matched trust evaluators, native SecTrust calls, anti-tamper and anti-debug evidence">
+      </picture>
+      <br><b>Static analysis.</b> Pinning detected, plus the exact evidence behind the call: trust evaluators, native <code>SecTrust</code> APIs, anti-tamper and anti-debug markers.
+    </td>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dynamic-pinning-dark.webp">
+        <img src="docs/screenshots/dynamic-pinning-light.webp" alt="Dynamic tab: per-endpoint pinning results from a clean proxy pass and an SSL Kill Switch pass, hostnames blurred">
+      </picture>
+      <br><b>Dynamic pinning probe.</b> A clean proxy pass and an SSL Kill Switch pass, graded per endpoint as not pinned, pinned-but-bypassed or hard-pinned.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/study-dark.webp">
+        <img src="docs/screenshots/study-light.webp" alt="Study page: a seeded 100-app campaign with adoption funnel, enforcement tiers and reasons for inconclusive results, app names blurred">
+      </picture>
+      <br><b>Studies.</b> A seeded 100-app campaign: the adoption funnel, enforcement tiers, and the reason behind every inconclusive result.
+    </td>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/corpus-dark.webp">
+        <img src="docs/screenshots/corpus-light.webp" alt="Corpus page: crawled apps across storefronts with acquired, pinning and attestation badges">
+      </picture>
+      <br><b>Corpus.</b> Thousands of crawled apps across storefronts, each badged by what has been done to it: acquired, pinning, attestation.
+    </td>
+  </tr>
+</table>
+
+## Offline FairPlay decryption
+
+<p align="center">
+  <img src="docs/screenshots/live-decrypt.webp" width="880" alt="Acquire tab: a live job console streaming an offline FairPlay decryption of nine binaries, finishing with 'decrypted offline' and DONE">
+</p>
+
+Acquire used to decrypt every app by installing it on the jailbroken iPhone 8, launching it and dumping it from memory. It now decrypts the downloaded IPA on the Mac with [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt), which derives the page keys from the IPA's own SINF and SUPF license records plus a 16-byte credential for the Apple account that owns it. Nothing is installed or launched.
+
+| | |
+|---|---|
+| **Correctness** | Byte-identical to the ipadecrypt output on every binary compared: 2 of 2 in one app, 25 of 25 in another. |
+| **Speed** | Decryption took 0.6 s for an 8 MB app and 3.3 s for a 93 MB app. A full acquire of a small app (download, decrypt, verify, record) finished in under 3 s. |
+| **Scope** | One credential per Apple account covers every app that account downloads. |
+| **Safety net** | Output is accepted only if no image the app needs at launch is still encrypted. Otherwise, or when an account has no credential, ipadecrypt runs exactly as before. |
+
+Set it up once:
+
+```bash
+# the tool has no upstream license, so it is cloned at a pinned commit rather than vendored (gitignored)
+git clone https://github.com/EthanArbuckle/fairplay-decrypt tools/fairplay-decrypt
+git -C tools/fairplay-decrypt checkout 0c952e15a705bf240a8ba6949c9e051b76624bdc
+make -C tools/fairplay-decrypt
+
+# once per Apple account: pass any ENCRYPTED IPA that account downloaded (e.g. via ipatool)
+python3 -m pipeline.cli fairplay-credential --ipa path/to/encrypted.ipa
+python3 -m pipeline.cli doctor        # "Offline FairPlay ... used by acquire: yes"
+```
+
+It applies when `ACQUIRE_MODE` is `appstore` or `ipatool`, the modes that stage the encrypted IPA locally. Retrieval details and caveats are under [Acquire](#acquire).
+
 ## Contents
 
+- [Highlights](#highlights)
+- [A look inside](#a-look-inside)
+- [Offline FairPlay decryption](#offline-fairplay-decryption)
 - [What it measures](#what-it-measures)
 - [How a run flows](#how-a-run-flows)
 - [The lab](#the-lab)
@@ -49,7 +143,7 @@ A FastAPI + HTMX console ("Havva" proper) sits on top of the whole thing so a ru
 
 ```mermaid
 flowchart LR
-    A[Crawl<br/>App Store categories] --> B[Acquire<br/>ipatool + ipadecrypt on JB iPhone 8]
+    A[Crawl<br/>App Store categories] --> B[Acquire<br/>download · offline FairPlay decrypt<br/>ipadecrypt on JB iPhone 8 as fallback]
     B --> C[Static<br/>strings · nm · Info.plist · frameworks]
     C --> D[Dynamic<br/>re-sign · inject · drive · MITM]
     D --> E[Attestation<br/>observe → probe → grade]
@@ -72,7 +166,7 @@ Havva is built for a concrete bench:
 
 | Role | Hardware | Why |
 |---|---|---|
-| **Decryption** | jailbroken iPhone 8, reachable over SSH | `ipadecrypt` dumps the decrypted Mach-O so static analysis sees real strings and symbols |
+| **Decryption** | jailbroken iPhone 8, reachable over SSH | static analysis needs decrypted Mach-Os; the device supplies one FairPlay credential per Apple account for offline decryption on the Mac, and `ipadecrypt` dumps apps on-device as the fallback |
 | **Measurement** | stock, non-jailbroken iPhone XR | apps are re-signed with a developer certificate and launched with injected dylibs; no jailbreak means no jailbreak-detection confound |
 | **Automation** | Appium + WebDriverAgent over the XCUITest driver | taps, types, reads the accessibility tree, auto-accepts system alerts |
 | **Interception** | Proxyman (HAR export) on the Mac | the stock device trusts the proxy CA; pinned apps are the ones that refuse it |
@@ -91,7 +185,7 @@ python3 -m pipeline.cli doctor  # checks ipatool, ipadecrypt, codesign, Appium, 
 python3 -m pipeline.cli status  # DB counts and stage readiness
 ```
 
-External tools (all invoked as subprocesses, never vendored): `ipatool`, `ipadecrypt` (bootstrapped onto the jailbroken device with `./tools/ipadecrypt bootstrap`), Xcode command-line tools (`codesign`, `xcodebuild` for WDA), `libimobiledevice` (`idevicesyslog`, `ideviceinstaller`), Appium 2 with the XCUITest driver, `frida-tools`, Proxyman, and optionally Hopper for the manual deep-dives.
+External tools (all invoked as subprocesses, never vendored): `ipatool`, [`fairplay-decrypt`](https://github.com/EthanArbuckle/fairplay-decrypt) for offline decryption (cloned and built under `tools/`, see [Offline FairPlay decryption](#offline-fairplay-decryption)), `ipadecrypt` (bootstrapped onto the jailbroken device with `./tools/ipadecrypt bootstrap`), Xcode command-line tools (`codesign`, `xcodebuild` for WDA), `libimobiledevice` (`idevicesyslog`, `ideviceinstaller`), Appium 2 with the XCUITest driver, `frida-tools`, Proxyman, and optionally Hopper for the manual deep-dives.
 
 The tweaks under `tweaks/` build with Theos; prebuilt copies of our own dylibs are checked in at the repository root so a fresh clone can run without a Theos toolchain.
 
@@ -103,6 +197,7 @@ All configuration is read from `.env` (never committed). The variables the code 
 |---|---|
 | Crawl | `CRAWL_COUNT_PER_CATEGORY`, `ITUNES_SERVER` |
 | Acquire | `ACQUIRE_MODE`, `IPATOOL_CMD`, `IPATOOL_EMAIL`, `IPATOOL_PASSWORD`, `IPADECRYPT_CMD`, `DECRYPT_SSH_HOST`, `DECRYPT_SSH_PORT`, `DECRYPT_SSH_USER` |
+| Offline FairPlay | `FAIRPLAY_OFFLINE` (default `1`), `FAIRPLAY_DECRYPT_DIR` (default `tools/fairplay-decrypt`), `FAIRPLAY_CREDENTIALS_DIR` (default `~/.fairplay-decrypt/credentials`, outside the repo), `FAIRPLAY_ROOT_KEY` (root SSH key on the jailbroken device, used only for credential retrieval) |
 | Measurement device | `TEST_DEVICE_UDID`, `TEST_DEVICE_IP`, `MONITOR_SECONDS`, `PROXYMAN_PORT` |
 | Signing | `SIGN_ENV`, `SIGN_P12_PASSWORD`, `SIGN_DEV_P12_PASSWORD` |
 | Injection | `DYLIB_SSKS`, `DYLIB_SSKS_ALIAS`, `DYLIB_SIDELOADFIX`, `DYLIB_FRIDA`, `DYLIB_FRIDA_ALIAS` |
@@ -118,7 +213,7 @@ Each stage is a CLI subcommand. Run them in order the first time; after that, an
 
 ```bash
 python3 -m pipeline.cli crawl              # App Store category listings → apps table
-python3 -m pipeline.cli acquire            # download, decrypt on the JB device, store the IPA
+python3 -m pipeline.cli acquire            # download, decrypt (offline FairPlay, else on the JB device), store the IPA
 python3 -m pipeline.cli static             # all static analyzers (pinning, ATS, attest, IAP, SBOM, storage)
 python3 -m pipeline.cli dynamic            # re-sign + inject + drive + MITM, with the bypass ladder
 python3 -m pipeline.cli attest             # App Attest enforcement probes (observe → probe → grade)
@@ -128,7 +223,7 @@ python3 -m pipeline.cli aggregate          # paper tables
 python3 -m pipeline.cli export             # CSV / JSON dumps
 ```
 
-Targeted single-purpose commands also exist: `analyze` (one app, verbose), `detect-pinning`, `detect-sideload`, `inspect-storage`, `iap-bypass`, `ats-gap`, `sbom`, `dep-stats`, `backfill-bundles`. Run `python3 -m pipeline.cli --help` for the full list and `python3 -m pipeline.cli <cmd> --help` for flags such as `--app`, `--limit`, `--dylibs`, `--entshim`, `--evade`.
+Targeted single-purpose commands also exist: `fairplay-credential` (provision or list offline-decryption credentials), `analyze` (one app, verbose), `detect-pinning`, `detect-sideload`, `inspect-storage`, `iap-bypass`, `ats-gap`, `sbom`, `dep-stats`, `backfill-bundles`. Run `python3 -m pipeline.cli --help` for the full list and `python3 -m pipeline.cli <cmd> --help` for flags such as `--app`, `--limit`, `--dylibs`, `--entshim`, `--evade`.
 
 ## The web console
 
@@ -151,7 +246,14 @@ The console only calls the same pipeline functions the CLI does. There is no sec
 Pulls the top apps per App Store category from the iTunes search and lookup APIs. Records bundle id, developer, price, and the store's *offers in-app purchases* flag, which later stages treat as **corroborating, never authoritative** (it is a frequent false negative in practice).
 
 ### Acquire
-`ipatool` downloads the encrypted IPA under the lab Apple ID; `ipadecrypt` installs it on the jailbroken iPhone 8, dumps the decrypted main binary and embedded frameworks, and repackages. The stage streams the decryptor's log into the console line by line, recognizes the `MismatchedApplicationIdentifierEntitlement` case (an earlier re-signed copy of the same app is installed under the lab team), uninstalls that copy exactly by bundle id, and retries once. Permanent failures (region-locked, removed, paid) are anchored and never retried; transient ones keep an attempt counter.
+The encrypted IPA is downloaded under the lab Apple ID, either through the MZStore protocol via an iTunes server (`ACQUIRE_MODE=appstore`, which can also fetch older builds) or with `ipatool`. Two decryptors are then tried in order:
+
+1. **Offline FairPlay** (`pipeline/fairplay.py`). The account that owns the IPA is read from its SINF `user` field. If a credential exists for that account, [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) decrypts every encrypted arm64 binary on the Mac into a temporary file. The result is moved into place only if `verify_decrypted` finds no launch-critical image with `cryptid != 0`; a partial or failed attempt never leaves a file behind.
+2. **ipadecrypt** (fallback). It installs the IPA on the jailbroken iPhone 8, dumps the decrypted main binary and embedded frameworks, and repackages. The stage streams the decryptor's log into the console line by line, recognizes the `MismatchedApplicationIdentifierEntitlement` case (an earlier re-signed copy of the same app is installed under the lab team), uninstalls that copy exactly by bundle id, and retries once.
+
+With a credential in place the iPhone 8 is no longer needed per app, so acquire only requires the device when an IPA's account has no credential. Permanent failures (region-locked, removed, paid) are anchored and never retried; transient ones keep an attempt counter.
+
+**Credentials.** `pipeline.cli fairplay-credential --ipa <encrypted.ipa>` retrieves the credential for that IPA's account from the jailbroken device, decrypts the IPA with it as a self-test, and only then stores it (mode `0600`) under `~/.fairplay-decrypt/credentials/<account>.bin`, outside the repository. `--import <credential.bin>` stores an existing credential after the same self-test, and `--list` shows what is provisioned. Retrieval needs root SSH by key on the device (on a rootless jailbreak root's home is `/var/jb/var/root`, not `/var/root`), at least one App Store app of that account installed on it, and it restarts the device's `fairplayd` once. It works over Wi-Fi: the device UDID is read on the device itself rather than through `idevice_id`. Each storefront account (US, GB, ...) needs its own credential; until then its apps go through ipadecrypt.
 
 ### Static
 Operates on the decrypted Mach-O plus `Info.plist` and the bundle listing, and never on a capped file tree:
@@ -247,7 +349,8 @@ pipeline/
   config.py            .env loading (no secret fallbacks)
   db.py                SQLite schema, tri-state queues, jobs table
   crawl.py             App Store category crawl
-  acquire.py           ipatool + ipadecrypt, autoremove, attempt accounting
+  acquire.py           download, offline-first decrypt with ipadecrypt fallback, autoremove, attempt accounting
+  fairplay.py          offline FairPlay: SINF account id, credential store, decrypt, credential retrieval
   analysis.py          static pinning / evidence blob (strings + nm)
   static_classify.py   configuration-based pinning classification, attest entitlement/symbols
   iap_static.py        StoreKit generation + validation-path detector
@@ -265,20 +368,21 @@ pipeline/
   web/                 FastAPI app, auth, job manager, HTMX templates, routers
 scripts/               frida probe scripts (attest_*.js), helpers
 tweaks/                Theos sources: AttestObserver, EvasionKit, EntitlementShim, AttestControlApp
-tests/                 pytest suite (276 tests)
-docs/                  audit record, paper drafts (threat model, system-model figure)
+tests/                 pytest suite (396 tests)
+docs/                  audit record, paper drafts (threat model, system-model figure), README screenshots
+tools/fairplay-decrypt offline decryptor, cloned at a pinned commit (gitignored, never committed)
 *.dylib                prebuilt loadable copies (ours and third-party)
 ```
 
-Gitignored on purpose: `.env`, `results/` (accounts, OTP tokens, exports), `ipas/`, `work/`, `logs/`, every `*.db` and backup, `*.ipa`, `*.har`, and vendored reference repositories.
+Gitignored on purpose: `.env`, `results/` (accounts, OTP tokens, exports), `ipas/`, `work/`, `logs/`, every `*.db` and backup, `*.ipa`, `*.har`, `tools/fairplay-decrypt/`, and vendored reference repositories. FairPlay credentials are kept outside the repository entirely.
 
 ## Tests and audit
 
 ```bash
-pytest -q        # 276 passed
+pytest -q        # 396 passed
 ```
 
-The suite covers the grading logic (tri-state attest grades, probe outcome rules, `client_assertion` is not an attestation header), static classifiers against synthetic binaries, HAR classification, `.ips` parsing, liveness, job cancellation scoping, log isolation, and the web routes. A full implementation audit with every finding and its fix is recorded in `docs/audit-2026-10-18.md`; the items still awaiting on-device validation (rebuilt enforcement probe, EntitlementShim scene net, EvasionKit remap) are listed there explicitly.
+The suite covers the offline-decryption decision (offline first, discard of still-encrypted output, fallback, device-offline handling, credential store guards), the grading logic (tri-state attest grades, probe outcome rules, `client_assertion` is not an attestation header), static classifiers against synthetic binaries, HAR classification, `.ips` parsing, liveness, job cancellation scoping, log isolation, and the web routes. A full implementation audit with every finding and its fix is recorded in `docs/audit-2026-10-18.md`; the items still awaiting on-device validation (rebuilt enforcement probe, EntitlementShim scene net, EvasionKit remap) are listed there explicitly.
 
 ## Research context
 
@@ -288,4 +392,4 @@ The suite covers the grading logic (tri-state attest grades, probe outcome rules
 
 ## Responsible use
 
-Havva is for authorized measurement research. Apps are measured, not attacked: the lab accounts are researcher-owned, no third-party data is accessed, and responsible disclosure applies to anything found. Turnkey per-app exploitation rules are not part of this repository. Evasion is capped at measurement hygiene (avoid trivially detecting the lab, report the residue) and is never an attempt to defeat enforced attestation. Decrypted binaries, captured traffic, credentials, and databases never leave the machine and are never committed.
+Havva is for authorized measurement research. Apps are measured, not attacked: the lab accounts are researcher-owned, no third-party data is accessed, and responsible disclosure applies to anything found. Turnkey per-app exploitation rules are not part of this repository. Evasion is capped at measurement hygiene (avoid trivially detecting the lab, report the residue) and is never an attempt to defeat enforced attestation. Decrypted binaries, captured traffic, credentials, and databases never leave the machine and are never committed. Offline FairPlay decryption only ever uses credentials of researcher-owned lab accounts, on IPAs those accounts downloaded; the decryptor itself is not redistributed here.
