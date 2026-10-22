@@ -40,6 +40,11 @@ design_export/
 # Foreign repositories vendored for reference (each has its own .git); re-clone, never embed
 mastg/
 docs/My-iOS-Pentesting-Cheatsheet/
+# Offline FairPlay decryptor (no upstream license: never commit it). Re-clone:
+#   git clone https://github.com/EthanArbuckle/fairplay-decrypt tools/fairplay-decrypt
+#   git -C tools/fairplay-decrypt checkout 0c952e15a705bf240a8ba6949c9e051b76624bdc
+#   make -C tools/fairplay-decrypt
+tools/fairplay-decrypt/
 
 # Per-tweak build copies (the loadable copies live in the project root)
 tweaks/*/*.dylib

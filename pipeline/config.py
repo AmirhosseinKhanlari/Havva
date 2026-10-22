@@ -162,6 +162,27 @@ class DecryptDevice:
 
 
 @dataclass(frozen=True)
+class FairPlay:
+    """Offline FairPlay decryption (tools/fairplay-decrypt). Decrypts a local
+    encrypted IPA on the Mac in seconds, with no install / launch on the iPhone 8,
+    using a 16-byte credential per Apple ACCOUNT (not per app). Credentials are
+    stored as <credentials_dir>/<account>.bin, where <account> is the 8-hex-digit
+    SINF `user` id of the IPAs that account downloads. When no credential matches
+    an IPA, acquire falls back to ipadecrypt on the device."""
+    enabled: bool = field(default_factory=lambda: _env("FAIRPLAY_OFFLINE", "1") not in ("0", "false", "no", ""))
+    tool_dir: Path = field(default_factory=lambda: _env_path(
+        "FAIRPLAY_DECRYPT_DIR", PROJECT_ROOT / "tools" / "fairplay-decrypt"))
+    # Kept OUTSIDE the repo (like ~/.ipadecrypt): a credential decrypts every app
+    # the account owns, so it must never be committed.
+    credentials_dir: Path = field(default_factory=lambda: _env_path(
+        "FAIRPLAY_CREDENTIALS_DIR", Path.home() / ".fairplay-decrypt" / "credentials"))
+    # Credential retrieval runs as root on the jailbroken iPhone 8 with KEY auth
+    # (the jailbreak's root home is /var/jb/var/root).
+    root_key: Path = field(default_factory=lambda: _env_path(
+        "FAIRPLAY_ROOT_KEY", Path.home() / ".ssh" / "id_ed25519"))
+
+
+@dataclass(frozen=True)
 class IpaTool:
     """Optional downloader: ipatool fetches the still-encrypted IPA, then
     ipadecrypt decrypts the local file. Alternative to letting ipadecrypt do the
@@ -325,6 +346,7 @@ class Config:
     signing: Signing = field(default_factory=Signing)
     llama: Llama = field(default_factory=Llama)
     dylibs: Dylibs = field(default_factory=Dylibs)
+    fairplay: FairPlay = field(default_factory=FairPlay)
     runtime: Runtime = field(default_factory=Runtime)
     acquire_mode: str = ACQUIRE_MODE
 

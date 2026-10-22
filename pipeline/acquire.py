@@ -1,10 +1,19 @@
-"""Stage B: acquire + decrypt via the prebuilt ipadecrypt binary.
+"""Stage B: acquire + decrypt.
 
-ipadecrypt runs on the Mac and drives the jailbroken iPhone 8 over SSH (its own
-connection config lives in ~/.ipadecrypt/config.json after a one-time
-`ipadecrypt bootstrap`). Per app we run:
+Two decryptors, tried in order once the encrypted IPA is staged locally
+(ACQUIRE_MODE=appstore or ipatool):
 
-    ipadecrypt decrypt <bundle-id|app-id> -o <out.ipa> --storefront <cc>
+1. Offline FairPlay (pipeline.fairplay -> tools/fairplay-decrypt): decrypts on
+   the Mac in seconds from the IPA's SINF/SUPF plus a per-ACCOUNT credential.
+   No install or launch on the iPhone 8. Used whenever a credential exists for
+   the IPA's account and the result passes `verify_decrypted`.
+2. ipadecrypt (fallback): runs on the Mac and drives the jailbroken iPhone 8 over
+   SSH (config in ~/.ipadecrypt/config.json after `ipadecrypt bootstrap`):
+
+    ipadecrypt decrypt <bundle-id|app-id|local.ipa> -o <out.ipa> --storefront <cc>
+
+ACQUIRE_MODE=ipadecrypt (ipadecrypt downloads itself) has no local encrypted
+IPA, so only ipadecrypt applies there.
 
 Failures map onto the tri-state work queue: unavailable/removed apps are a
 permanent skip, transient errors (timeout, device hiccup) stay UNTESTED so the
@@ -15,7 +24,9 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 
+from . import fairplay
 from .config import CONFIG
 from .db import Database
 from .models import Stage, WorkState
@@ -449,6 +460,48 @@ def _uninstall_script(bundle_id: str) -> str:
     ) % bundle_id
 
 
+def offline_capable() -> bool:
+    """Can this acquire mode decrypt without the iPhone 8? Needs a locally staged
+    encrypted IPA (appstore / ipatool) and a ready offline FairPlay setup. The
+    device is then only needed for accounts without a credential."""
+    return CONFIG.acquire_mode in ("ipatool", "appstore") and fairplay.ready()[0]
+
+
+def _decrypt_offline(enc_path: str, out: Path) -> tuple[WorkState, str, str] | None:
+    """Try offline FairPlay. Returns the final (state, path, note) on success, or
+    None to fall back to ipadecrypt (tool not ready, no credential for this
+    account, tool error, or a launch-critical image left encrypted). The
+    encrypted staging file is kept for the fallback and removed on success."""
+    if not CONFIG.fairplay.enabled:
+        return None
+    ok, why = fairplay.tool_ready()
+    if not ok:
+        log.info("  offline FairPlay unavailable (%s); using ipadecrypt", why)
+        return None
+    # Never write straight to `out`: a failed or partial attempt must leave no
+    # file that a later run could take for a finished decrypt.
+    tmp = out.with_name(f".{out.name}.fairplay")
+    _unlink_quiet(tmp)
+    log.info("  decrypting offline (fairplay-decrypt) ...")
+    res = fairplay.decrypt(enc_path, tmp, line_cb=lambda ln: log.info("  fairplay | %s", ln))
+    if not res.ok:
+        _unlink_quiet(tmp)
+        (log.info if res.no_credential else log.warning)(
+            "  offline FairPlay: %s; falling back to ipadecrypt", res.error)
+        return None
+    v = verify_decrypted(tmp)
+    if v["critical"]:
+        _unlink_quiet(tmp)
+        log.warning("  offline FairPlay left %d launch image(s) encrypted (%s); falling back to ipadecrypt",
+                    len(v["critical"]), ", ".join(v["critical"][:3]))
+        return None
+    os.replace(tmp, out)
+    _, note = _accept_decrypted(out)      # no critical image (checked above); logs caveats
+    _unlink_quiet(enc_path)
+    log.info("  ✓ decrypted offline: %s (%.1f MB) -> %s", res.summary, _mb(out), out)
+    return WorkState.POSITIVE, str(out), note
+
+
 def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = False,
                 auth_code: str = "", timeout: int = 900,
                 app_ver_id: str | None = None, progress_cb=None) -> tuple[WorkState, str, str]:
@@ -457,10 +510,10 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
     Two modes (config.acquire_mode):
       ipadecrypt: ipadecrypt downloads from the App Store (--storefront) and
                   decrypts in one step.
-      ipatool:    ipatool downloads the encrypted IPA, then ipadecrypt decrypts
-                  that local file.
+      ipatool:    ipatool downloads the encrypted IPA, then it is decrypted
+                  locally (offline FairPlay first, ipadecrypt as fallback).
       appstore:   MZStore download via the Windows iTunes server (supports
-                  app_ver_id to fetch an OLDER build), then ipadecrypt decrypts.
+                  app_ver_id to fetch an OLDER build), then decrypted the same way.
     """
     CONFIG.paths.ipa_dir.mkdir(parents=True, exist_ok=True)
     sync_ipadecrypt_host()   # keep ipadecrypt's host in sync with DECRYPT_SSH_HOST
@@ -489,8 +542,20 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
                 return WorkState.DONE_NEGATIVE, "", "unavailable: " + err
             log.warning("  ✗ %s download failed: %s (will retry)", ident, _short_reason(err))
             return WorkState.UNTESTED, "", err
-        # Decrypt the local encrypted IPA on the jailbroken device.
-        cmd = [CONFIG.decrypt_device.ipadecrypt_cmd, "decrypt", enc_path,
+        # 1) Offline FairPlay on the Mac: seconds, no device round trip.
+        done = _decrypt_offline(enc_path, out)
+        if done is not None:
+            return done
+        # 2) Fallback: decrypt the local encrypted IPA on the jailbroken device.
+        dd = CONFIG.decrypt_device
+        if not (dd.is_bootstrapped and dd.online()):
+            _unlink_quiet(enc_path)
+            where = f"{dd.ssh_host}:{dd.ssh_port}" if dd.ssh_host else "(DECRYPT_SSH_HOST not set)"
+            why = ("offline FairPlay could not decrypt it and the decrypt device (iPhone 8) is "
+                   + ("not bootstrapped" if not dd.is_bootstrapped else f"offline at {where}"))
+            log.warning("  ✗ %s: %s", ident, why)
+            return WorkState.UNTESTED, "", why
+        cmd = [dd.ipadecrypt_cmd, "decrypt", enc_path,
                "-o", str(out), "--redact", "-v"]
     else:
         cmd = [CONFIG.decrypt_device.ipadecrypt_cmd, "decrypt", ident,
@@ -551,6 +616,127 @@ def decrypt_one(app_id: str, row, from_appstore: bool = False, purchase: bool = 
     return WorkState.UNTESTED, "", (proc.stderr or proc.stdout or "unknown error")[:300]
 
 
+_MACHO_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+
+
+def _macho_info(data: bytes) -> tuple[list[int], list[tuple[str, bool]]]:
+    """(cryptids, [(dylib name, weak)]) of a thin or fat Mach-O (first slice
+    for the load list; every slice for the cryptids)."""
+    import struct
+    cryptids: list[int] = []
+    loads: list[tuple[str, bool]] = []
+
+    def thin(off: int, want_loads: bool) -> None:
+        magic = data[off:off + 4]
+        if magic not in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"):
+            return
+        ncmds = struct.unpack_from("<I", data, off + 16)[0]
+        p = off + (32 if magic == b"\xcf\xfa\xed\xfe" else 28)
+        for _ in range(ncmds):
+            cmd, size = struct.unpack_from("<II", data, p)
+            if cmd in (0x21, 0x2C):                       # LC_ENCRYPTION_INFO(_64)
+                cryptids.append(struct.unpack_from("<I", data, p + 16)[0])
+            elif want_loads and cmd in (0xC, 0x80000018, 0x8000001F):   # load / weak / reexport
+                name_off = struct.unpack_from("<I", data, p + 8)[0]
+                raw = data[p + name_off:p + size].split(b"\x00", 1)[0]
+                loads.append((raw.decode("utf-8", "replace"), cmd == 0x80000018))
+            p += size
+    if data[:4] == b"\xca\xfe\xba\xbe":                  # fat (big-endian header)
+        n = struct.unpack_from(">I", data, 4)[0]
+        for i in range(n):
+            thin(struct.unpack_from(">I", data, 8 + i * 20 + 8)[0], i == 0)
+    else:
+        thin(0, True)
+    return cryptids, loads
+
+
+def verify_decrypted(ipa_path: "str | Path") -> dict:
+    """Which Mach-O images of a decrypted IPA are still encrypted (cryptid != 0).
+    ipadecrypt writes its output even when its own verification fails, so the
+    file existing proves nothing. Returns
+      critical  encrypted images the app needs at LAUNCH: the main executable,
+                or a framework reachable from it through non-weak load commands
+                (the re-signed app cannot start: dyld 'Library missing')
+      partial   encrypted frameworks loaded only on demand (the app runs; their
+                code is unreadable to static analysis)
+      extensions encrypted app extensions (never loaded by our runs)"""
+    import plistlib
+    import zipfile
+    res = {"critical": [], "partial": [], "extensions": []}
+    try:
+        z = zipfile.ZipFile(ipa_path)
+    except (zipfile.BadZipFile, OSError):
+        res["critical"].append("<unreadable ipa>")
+        return res
+    with z:
+        infos = sorted((n for n in z.namelist() if n.startswith("Payload/") and n.endswith(".app/Info.plist")
+                        and n.count(".app/") == 1), key=len)
+        if not infos:
+            res["critical"].append("<no app bundle>")
+            return res
+        app = infos[0].rsplit("/", 1)[0] + "/"
+        try:
+            main = app + plistlib.loads(z.read(infos[0]))["CFBundleExecutable"]
+        except (KeyError, ValueError, plistlib.InvalidFileException):
+            res["critical"].append("<no executable>")
+            return res
+        images: dict[str, tuple[list[int], list[tuple[str, bool]]]] = {}
+        for info in z.infolist():
+            n = info.filename
+            if not n.startswith(app) or info.is_dir() or info.file_size < 4096:
+                continue
+            with z.open(info) as fh:
+                if fh.read(4) not in _MACHO_MAGICS:
+                    continue
+            images[n] = _macho_info(z.read(info))
+
+    def member(dep: str) -> str | None:
+        if dep.startswith("@rpath/") or dep.startswith("@executable_path/Frameworks/"):
+            rel = dep.split("/", 1)[1] if dep.startswith("@rpath/") else dep[len("@executable_path/Frameworks/"):]
+            cand = app + "Frameworks/" + rel
+            return cand if cand in images else None
+        return None
+    launch, todo = set(), [main]
+    while todo:                                   # non-weak closure from the main binary
+        img = todo.pop()
+        if img in launch or img not in images:
+            continue
+        launch.add(img)
+        todo += [m for d, weak in images[img][1] if not weak for m in [member(d)] if m]
+    for img, (cids, _) in images.items():
+        if not any(c != 0 for c in cids):
+            continue
+        rel = img[len(app):]
+        if ".appex/" in rel:
+            res["extensions"].append(rel)
+        elif img in launch:
+            res["critical"].append(rel)
+        else:
+            res["partial"].append(rel)
+    return res
+
+
+def _accept_decrypted(out: Path) -> tuple[bool, str]:
+    """Is the decrypted IPA usable? An incomplete one is moved aside; a partial
+    one (on-demand frameworks still encrypted) is kept and the caveat returned."""
+    v = verify_decrypted(out)
+    if v["extensions"]:
+        log.info("  note: %d app extension(s) still encrypted (not used by our runs)", len(v["extensions"]))
+    if v["critical"]:
+        try:
+            out.replace(out.with_suffix(".partial.ipa"))
+        except OSError:
+            pass
+        return False, (f"decrypt incomplete: {len(v['critical'])} image(s) needed at launch still "
+                       f"encrypted ({', '.join(v['critical'][:3])})")
+    if v["partial"]:
+        note = (f"partial: {len(v['partial'])} on-demand framework(s) still encrypted "
+                f"({', '.join(p.split('/')[-1] for p in v['partial'][:3])})")
+        log.warning("  %s", note)
+        return True, note
+    return True, ""
+
+
 def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None = None,
                 country: str = "us", from_appstore: bool = False, purchase: bool = False,
                 auth_code: str = "", app_ver_id: str | None = None,
@@ -563,9 +749,12 @@ def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None =
     version to fetch an OLDER build instead of the current one."""
     if not bundle_id and not app_id:
         return WorkState.DONE_NEGATIVE, "", "need a bundle id or app id"
-    if not CONFIG.decrypt_device.is_bootstrapped:
+    # With offline FairPlay the iPhone 8 is only a fallback: decrypt_one checks
+    # it when (and only when) an IPA's account has no credential.
+    offline = offline_capable()
+    if not offline and not CONFIG.decrypt_device.is_bootstrapped:
         return WorkState.UNTESTED, "", "ipadecrypt not bootstrapped"
-    if not CONFIG.decrypt_device.online():
+    if not offline and not CONFIG.decrypt_device.online():
         dd = CONFIG.decrypt_device
         where = f"{dd.ssh_host}:{dd.ssh_port}" if dd.ssh_host else "(DECRYPT_SSH_HOST not set)"
         log.error("decrypt device (iPhone 8) offline at %s; not acquiring", where)
@@ -617,7 +806,7 @@ def acquire_one(db: Database, bundle_id: str | None = None, app_id: str | None =
 def run(db: Database, limit: int | None = None, from_appstore: bool = False,
         purchase: bool = False) -> dict[str, int]:
     """Acquire all apps still needing decryption. Resumable via the work queue."""
-    if not CONFIG.decrypt_device.is_bootstrapped:
+    if not offline_capable() and not CONFIG.decrypt_device.is_bootstrapped:
         log.error("ipadecrypt not bootstrapped. Run `%s bootstrap` first.",
                   CONFIG.decrypt_device.ipadecrypt_cmd)
         return {"attempted": 0, "ok": 0, "skipped": 0, "retry": 0}
@@ -630,7 +819,8 @@ def run(db: Database, limit: int | None = None, from_appstore: bool = False,
         rows = rows[:limit]
 
     total = len(rows)
-    log.info("acquire: %d app(s) queued (mode=%s)", total, CONFIG.acquire_mode)
+    log.info("acquire: %d app(s) queued (mode=%s, offline FairPlay: %s)", total, CONFIG.acquire_mode,
+             ", ".join(fairplay.accounts()) if offline_capable() else "off (" + fairplay.ready()[1] + ")")
     stats = {"attempted": 0, "ok": 0, "skipped": 0, "retry": 0}
     for i, row in enumerate(rows, 1):
         app_id = row["app_id"]

@@ -341,6 +341,43 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"  ipadecrypt bootstrapped  {'yes' if CONFIG.decrypt_device.is_bootstrapped else 'NO (run bootstrap)'}")
     import shutil as _sh
     print(f"  ipadecrypt binary        {'ok' if _sh.which(CONFIG.decrypt_device.ipadecrypt_cmd) or Path_exists(Path(CONFIG.decrypt_device.ipadecrypt_cmd)) else 'MISSING'}")
+
+    from . import acquire, fairplay
+    fp = CONFIG.fairplay
+    t_ok, t_why = fairplay.tool_ready()
+    accts = fairplay.accounts()
+    print("\nOffline FairPlay (fairplay-decrypt):")
+    print(f"  tool                     {'ok: ' + str(fp.tool_dir) if t_ok else 'NOT READY: ' + t_why}")
+    print(f"  credentials              {', '.join(accts) if accts else 'none'}  ({fp.credentials_dir})")
+    print(f"  used by acquire          {'yes' if acquire.offline_capable() else 'no'} "
+          f"(ACQUIRE_MODE={CONFIG.acquire_mode}; needs appstore/ipatool + tool + a credential)")
+    return 0
+
+
+def cmd_fairplay_credential(args: argparse.Namespace) -> int:
+    """Provision the offline FairPlay credential for one Apple account."""
+    from . import fairplay
+    if args.list:
+        accts = fairplay.accounts()
+        print(f"{len(accts)} credential(s) in {CONFIG.fairplay.credentials_dir}")
+        for a in accts:
+            print(f"  {a}")
+        return 0
+    if not args.ipa:
+        print("--ipa <encrypted IPA of the account> is required (it names the account and is "
+              "used to self-test the credential)")
+        return 1
+    try:
+        if args.import_file:
+            acct, path, summary = fairplay.import_credential(args.import_file, args.ipa, force=args.force)
+        else:
+            print("retrieving from the jailbroken decrypt device (restarts its fairplayd once) ...")
+            acct, path, summary = fairplay.retrieve_credential(
+                args.ipa, force=args.force, line_cb=lambda ln: print("  " + ln))
+    except (OSError, ValueError, RuntimeError) as e:
+        print(f"✗ {e}")
+        return 1
+    print(f"✓ account {acct}: {path}  (self-test: {summary})")
     return 0
 
 
@@ -384,6 +421,18 @@ def main() -> int:
     p_acq.add_argument("--version-limit", type=int, default=None,
                        help="cap how many newest versions to resolve for --list-versions")
     p_acq.set_defaults(func=cmd_acquire)
+
+    p_fpc = sub.add_parser("fairplay-credential",
+                           help="provision the offline FairPlay credential for one Apple account "
+                                "(one time per account; acquire then decrypts that account's IPAs "
+                                "on the Mac without the iPhone 8)")
+    p_fpc.add_argument("--ipa", help="an ENCRYPTED IPA downloaded by that account (names the "
+                                     "account and self-tests the credential)")
+    p_fpc.add_argument("--import", dest="import_file",
+                       help="store an existing 16-byte credential.bin instead of retrieving one")
+    p_fpc.add_argument("--force", action="store_true", help="replace a different stored credential")
+    p_fpc.add_argument("--list", action="store_true", help="list stored credentials and exit")
+    p_fpc.set_defaults(func=cmd_fairplay_credential)
 
     p_static = sub.add_parser("static", help="static defense classifier over decrypted IPAs")
     p_static.add_argument("--limit", type=int, help="max apps this run")
